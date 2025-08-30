@@ -23,6 +23,7 @@ def test_train_bpe_speed():
         special_tokens=["<|endoftext|>"],
     )
     end_time = time.time()
+    print("Time: ", end_time - start_time)
     assert end_time - start_time < 1.5
 
 
@@ -65,6 +66,7 @@ def test_train_bpe():
     # Rather than checking that the vocabs exactly match (since they could
     # have been constructed differently, we'll make sure that the vocab keys and values match)
     assert set(vocab.keys()) == set(reference_vocab.keys())
+
     assert set(vocab.values()) == set(reference_vocab.values())
 
 
