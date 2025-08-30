@@ -24,6 +24,12 @@ def stopwatch(fn: Callable[..., Any]) -> Callable[..., Any]:
             fn.__name__,
             end_time - start_time,
         )
+        print(
+            "Function %s took %.3f seconds to execute" %
+            (fn.__name__,
+            end_time - start_time,
+            )
+        )
         return result
 
     return wrapper

@@ -1,32 +1,45 @@
 from cs336_tokenizer import bpe
-from token_utils import gpt2_bytes_to_unicode
+from token_utils import gpt2_bytes_to_unicode, save_vocab_and_merges
+from utils import stopwatch
 
 
-pre_tokenizer_pattern = r"""(?:\w+)"""
-## Usage
-vocab, merge_list = bpe.train_bpe(
-    input_path="data/bpe_sample2.txt",
-    vocab_size=256 + 1 + 6,
+#pre_tokenizer_pattern = r"""(?:\w+)"""
+
+vocab_size = 10_000
+prefix = 'data/TinyStoriesV2-GPT4-validate'
+prefix = 'data/TinyStoriesV2-GPT4-train'
+vocab_size = 32_000
+prefix = 'data/owt_valid'
+#prefix = 'data/owt-train'
+
+vocab, merge_list = stopwatch(bpe.train_bpe)(
+    input_path=f"{prefix}.txt",
+    vocab_size=vocab_size,
     special_tokens=["<|endoftext|>"],
     num_processes=1,
-    pre_tokenizer_pattern = pre_tokenizer_pattern
+#    pre_tokenizer_pattern = pre_tokenizer_pattern
 )
 
-byte_to_unicode = gpt2_bytes_to_unicode()
+should_print = False
 
-string_vocab = {
-    "".join([byte_to_unicode[b] for b in byte_token]): k
-    for k, byte_token in vocab.items()
-}
+if should_print:
+    byte_to_unicode = gpt2_bytes_to_unicode()
 
-print(string_vocab)
-print("----")
+    string_vocab = {
+        "".join([byte_to_unicode[b] for b in byte_token]): k
+        for k, byte_token in vocab.items()
+    }
 
-string_merges = [
-    f"{''.join([byte_to_unicode[b] for b in merge[0]])} "
-    f"{''.join([byte_to_unicode[b] for b in merge[1]])}"
-    for merge in merge_list
-]
+    print(string_vocab)
+    print("----")
 
-print(merge_list)
+    string_merges = [
+        f"{''.join([byte_to_unicode[b] for b in merge[0]])} "
+        f"{''.join([byte_to_unicode[b] for b in merge[1]])}"
+        for merge in merge_list
+    ]
+
+    print(merge_list)
+else:
+    save_vocab_and_merges(vocab, merge_list, vocab_path=f'{prefix}-vocab.json', merges_path=f'{prefix}-merges.txt')
 
