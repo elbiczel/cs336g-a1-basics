@@ -1,6 +1,6 @@
 import os
 import regex as re
-from collections import defaultdict
+from collections import defaultdict, Counter
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import BinaryIO, Dict, Tuple, Iterator, Optional, Iterable, Iterable, List
 
@@ -114,20 +114,23 @@ def _byte_pairs(b: Tuple[bytes, ...]) -> Iterator[BytePair]:
         yield (prev, cur)
         prev = cur
 
-# Irrelevant.
-def _init_byte_pair_freqs(sequences: List[Tuple[Tuple[bytes, ...], int]]) -> Dict[BytePair, int]:
+def _init_byte_pair_freqs(sequences: List[Tuple[Tuple[bytes, ...], int]]) -> tuple[Dict[BytePair, int], Dict[BytePair, Counter[int]]]:
     counts: Dict[BytePair, int] = {}
-    for seq, freq in sequences:
+    occurances: Dict[BytePair, Counter[int]] = {}
+    for i, (seq, freq) in enumerate(sequences):
         if len(seq) < 2: continue
         # Inline the tight loop; use locals for speed
         get = counts.get
         setitem = counts.__setitem__
         for bp in _byte_pairs(seq):
+            # We could track the offset of the bp in occurances as well.
+            # This would allow us for simpler apply_merge_to_seq implementation.
+            # But would require dynamic updates to the offset after merging.
+            occurances.setdefault(bp, Counter())[i] += 1
             setitem(bp, get(bp, 0) + freq)
-    return counts
+    return counts, occurances
 
 
-# Irrelevant.
 def _find_merge(byte_pair_freqs: Dict[BytePair, int]) -> BytePair | None:
     best_pair: Optional[BytePair] = None
     best_count = 2
@@ -137,18 +140,16 @@ def _find_merge(byte_pair_freqs: Dict[BytePair, int]) -> BytePair | None:
             best_pair = bp
     return best_pair
 
-# Total time: 30.7s with 127.7M calls on TinyStories Valid dataset.
-# Total time: 150s with 584M calls on TinyStories Train dataset.
 def _apply_merge_to_seq(seq: Tuple[bytes, ...], merge: BytePair) -> tuple[Tuple[bytes, ...], Dict[BytePair, int]]:
     ret_value = []
-    prev_merge = 0
+    post_prev_merge = 0
     i = 0
     deltas = defaultdict(int)
     seq_len = len(seq)
+    new_value = merge[0] + merge[1]
     while i < seq_len - 1:
         if seq[i] == merge[0] and seq[i+1] == merge[1]:
-            ret_value += seq[prev_merge:i]
-            new_value = merge[0] + merge[1]
+            ret_value.extend(seq[post_prev_merge:i])
             ret_value.append(new_value)
             if i > 0:
                 deltas[(seq[i-1], seq[i])] -= 1
@@ -157,27 +158,28 @@ def _apply_merge_to_seq(seq: Tuple[bytes, ...], merge: BytePair) -> tuple[Tuple[
                 deltas[(seq[i+1], seq[i+2])] -= 1
                 deltas[(new_value, seq[i+2])] += 1
             i += 1
-            prev_merge = i + 1
+            post_prev_merge = i + 1
         i += 1
-    if not prev_merge:
-        return (), {}
-    ret_value += seq[prev_merge:]
+    if post_prev_merge < seq_len:
+        ret_value.extend(seq[post_prev_merge:])
     return tuple(ret_value), deltas
 
-# Total time: 60.2s with 10k calls, each 0.0075s on TinyStories Valid dataset.
-# Total time: 300s with 10k calls, each 0.031s on TinyStories Train dataset. ~84% of execution time.
 def _apply_merge(
         sequences: List[Tuple[Tuple[bytes, ...], int]],
+        occurances: Dict[BytePair, Counter[int]],
         byte_pair_freqs: Dict[BytePair, int],
         merge: BytePair):
     del byte_pair_freqs[merge]
-    # TODO: This can be optimized further by keeping track of bp occurances.
-    for i, (seq, freq) in enumerate(sequences):
+    seq_ids = set(occurances[merge].keys())
+    for i in seq_ids:
+        seq, freq = sequences[i]
         new_seq, deltas = _apply_merge_to_seq(seq, merge)
         if new_seq:
             sequences[i] = (new_seq, freq)
         for bp, delta in deltas.items():
             byte_pair_freqs[bp] = byte_pair_freqs.get(bp, 0) + delta * freq
+            occurances.setdefault(bp, Counter())[i] += delta
+    del occurances[merge]
 
 
 def train_bpe(
@@ -203,7 +205,7 @@ def train_bpe(
 
     # Find merges
     merge_list = []
-    byte_pair_freqs = _init_byte_pair_freqs(sequences)
+    byte_pair_freqs, occurances = _init_byte_pair_freqs(sequences)
     for _ in range(vocab_size - len(vocab)):
         merge = _find_merge(byte_pair_freqs)
         if not merge:
@@ -211,7 +213,7 @@ def train_bpe(
         merge_list.append(merge)
         vocab[len(vocab)] = merge[0] + merge[1]
         # Changes input collections in place.
-        _apply_merge(sequences, byte_pair_freqs, merge)
+        _apply_merge(sequences, occurances, byte_pair_freqs, merge)
 
     return (vocab, merge_list)
 

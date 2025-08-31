@@ -9,12 +9,13 @@ should_print = False
 vocab_size = 10_000
 prefix = 'data/bpe_sample'
 prefix = 'data/TinyStoriesV2-GPT4-valid'
-# ~6 mins to complete
+# ~1 mins to complete
 prefix = 'data/TinyStoriesV2-GPT4-train'
-#vocab_size = 32_000
-# ~2 hours to complete
-#prefix = 'data/owt_valid'
-#prefix = 'data/owt_train'
+vocab_size = 32_000
+# ~8 mins to complete
+prefix = 'data/owt_valid'
+# 52 mins to complete
+prefix = 'data/owt_train'
 
 if __name__ == "__main__":
     vocab, merge_list = stopwatch(bpe.train_bpe)(
