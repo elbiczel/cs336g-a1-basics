@@ -58,20 +58,27 @@ def _pretoken_to_key(text: str) -> Tuple[bytes, ...]:
 
 PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
 
-def _get_pretokenized_sequence(text: str, specials_re, pre_tokenization_re) -> Iterator[str]:
-    for part in re.split(specials_re, text):
-        if re.match(specials_re, part):
-            yield part
-        else:
-            for pre_token in re.finditer(PAT, part):
-                yield pre_token.group()
+def _get_pretokenized_sequence(text: str, specials_re, pre_tokenization_re, yield_specials: bool = True) -> Iterator[str]:
+    special_iter = specials_re.finditer(text)
+    pos = 0
+    for sm in special_iter:
+        # normal chunk before the special
+        for tm in pre_tokenization_re.finditer(text, pos, sm.start()):
+            yield tm.group(0)
+        # the special itself
+        if yield_specials:
+            yield sm.group(0)
+        pos = sm.end()
+    # tail after the last special
+    for tm in pre_tokenization_re.finditer(text, pos):
+        yield tm.group(0)
 
 def _get_chunk_freqs(input_path: str | os.PathLike, start: int, end: int, specials_re, pre_tokenization_re) -> Dict[Tuple[bytes, ...], int]:
     with open(input_path, "rb") as f:
         f.seek(start)
         chunk = f.read(end - start).decode("utf-8", errors="ignore")
         freqs = defaultdict(int)
-        for pre_token in _get_pretokenized_sequence(chunk, specials_re, pre_tokenization_re):
+        for pre_token in _get_pretokenized_sequence(chunk, specials_re, pre_tokenization_re, False):
             freqs[_pretoken_to_key(pre_token)] += 1
         return freqs
 
@@ -184,7 +191,8 @@ def train_bpe(
     pre_tokenization_re = pre_tokenization_re or PAT
     pre_tokenization_re = re.compile(pre_tokenization_re)
     special_token = b"<|endoftext|>" if "<|endoftext|>" in special_tokens else special_tokens[0].encode("utf-8")
-    specials_re = re.compile("(?:" + "|".join(re.escape(t) for t in special_tokens) + ")")
+    special_tokens = sorted(special_tokens, key=len, reverse=True)
+    specials_re = re.compile("(" + "|".join(re.escape(t) for t in special_tokens) + ")")
 
     # Basic vocab.
     vocab = {i: t.encode("utf-8") for i, t in enumerate(special_tokens)}

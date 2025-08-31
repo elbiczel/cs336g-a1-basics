@@ -13,7 +13,7 @@ prefix = 'data/TinyStoriesV2-GPT4-valid'
 vocab_size = 32_000
 # ~2 hours to complete
 prefix = 'data/owt_valid'
-prefix = 'data/owt_train'
+#prefix = 'data/owt_train'
 
 if __name__ == "__main__":
     vocab, merge_list = stopwatch(bpe.train_bpe)(
