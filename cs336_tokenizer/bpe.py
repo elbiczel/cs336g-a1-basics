@@ -2,9 +2,10 @@ import os
 import regex as re
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from typing import BinaryIO, Dict, Tuple, Iterator, Optional
+from typing import BinaryIO, Dict, Tuple, Iterator, Optional, Iterable, Iterable
 
 from cs336_basics.common_types import BytePair, MergeList, Vocab
+from cs336_basics import token_utils
 
 def find_chunk_boundaries(
     file: BinaryIO,
@@ -57,15 +58,21 @@ def _pretoken_to_key(text: str) -> Tuple[bytes, ...]:
 
 PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
 
+def _get_pretokenized_sequence(text: str, specials_re, pre_tokenization_re) -> Iterator[str]:
+    for part in re.split(specials_re, text):
+        if re.match(specials_re, part):
+            yield part
+        else:
+            for pre_token in re.finditer(PAT, part):
+                yield pre_token.group()
+
 def _get_chunk_freqs(input_path: str | os.PathLike, start: int, end: int, specials_re, pre_tokenization_re) -> Dict[Tuple[bytes, ...], int]:
     with open(input_path, "rb") as f:
         f.seek(start)
         chunk = f.read(end - start).decode("utf-8", errors="ignore")
         freqs = defaultdict(int)
-        parts = re.split(specials_re, chunk)
-        for part in parts:
-            for pre_token in re.finditer(pre_tokenization_re, part):
-                freqs[_pretoken_to_key(pre_token.group())] += 1
+        for pre_token in _get_pretokenized_sequence(chunk, specials_re, pre_tokenization_re):
+            freqs[_pretoken_to_key(pre_token)] += 1
         return freqs
 
 def _merge_freqs(master: Dict[Tuple[bytes, ...], int], additional: Dict[Tuple[bytes, ...], int]) -> Dict[Tuple[bytes, ...], int]:
@@ -198,3 +205,59 @@ def train_bpe(
         freqs, byte_pair_freqs = _apply_merge(freqs, byte_pair_freqs, merge)
 
     return (vocab, merge_list)
+
+class Tokenizer:
+    MALFORMED_CHAR_BYTES = "�".encode("utf-8")
+
+    def __init__(self, vocab: Vocab, merges: MergeList, special_tokens: list[bytes] | None = None):
+        self._vocab = dict(vocab)
+        self._merges = list(merges)
+        self._sepcial_tokens = sorted(special_tokens, key=len, reverse=True) if special_tokens else []
+        self.init()
+
+    @classmethod
+    def from_files(cls, vocab_filepath: str | os.PathLike, merges_filepath: str | os.PathLike, special_tokens: list[bytes] | None = None):
+        vocab, merge_list = token_utils.load_vocab_and_merges(vocab_filepath, merges_filepath)
+        return Tokenizer(vocab, merge_list, special_tokens)
+
+    def init(self):
+        self._pre_tokenization_re = re.compile(PAT)
+        if self._sepcial_tokens:
+            self._specials_re = re.compile("(" + "|".join(re.escape(t.decode("utf-8")) for t in self._sepcial_tokens) + ")")
+        else:
+            self._specials_re = re.compile(r'a^')
+        self._reverse = {seq: token for token, seq in self._vocab.items()}
+        if self._sepcial_tokens:
+            for t in self._sepcial_tokens:
+                if t not in self._reverse:
+                    self._reverse[t] = len(self._vocab)
+                    self._vocab[len(self._vocab)] = t
+        # TODO: Drop _merges and construct a Radix Tree out of vocab for encode optimization.
+
+    def encode(self, text: str) -> list[int]:
+        out = []
+
+        for pre_token in _get_pretokenized_sequence(text, self._specials_re, self._pre_tokenization_re):
+            if re.match(self._specials_re, pre_token):
+                out.append(self._reverse[pre_token.encode("utf-8")])
+                continue
+            seq = list(_pretoken_to_key(pre_token))
+            for merge in self._merges:
+                i = 0
+                while i < len(seq) - 1:
+                    if seq[i] == merge[0] and seq[i+1] == merge[1]:
+                        seq = seq[:i] + [merge[0] + merge[1]] + seq[i+2:]
+                    i += 1
+                        
+            for b in seq:
+                out.append(self._reverse[b])
+
+        return out
+    
+    def encode_iterable(self, iterable: Iterable[str]) -> Iterator[int]:
+        for text in iterable:
+            for token in self.encode(text):
+                yield token
+    
+    def decode(self, ids: list[int]) -> str:
+        return b"".join([self._vocab.get(id, self.MALFORMED_CHAR_BYTES) for id in ids]).decode("utf-8", errors="replace")

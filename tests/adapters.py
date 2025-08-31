@@ -561,7 +561,8 @@ def get_tokenizer(
     Returns:
         A BPE tokenizer that uses the provided vocab, merges, and special tokens.
     """
-    raise NotImplementedError
+    byte_special_tokens = [t.encode("utf-8") for t in special_tokens] if special_tokens else None
+    return bpe.Tokenizer(vocab, merges, byte_special_tokens)
 
 
 def run_train_bpe(
