@@ -3,11 +3,13 @@ from token_utils import gpt2_bytes_to_unicode, save_vocab_and_merges
 from utils import stopwatch
 
 
-#pre_tokenizer_pattern = r"""(?:\w+)"""
+pre_tokenizer_pattern = None # r"""(?:\w+)"""
 
+should_print = False
 vocab_size = 10_000
+prefix = 'data/bpe_sample'
 prefix = 'data/TinyStoriesV2-GPT4-valid'
-prefix = 'data/TinyStoriesV2-GPT4-train'
+#prefix = 'data/TinyStoriesV2-GPT4-train'
 #vocab_size = 32_000
 #prefix = 'data/owt_valid'
 #prefix = 'data/owt-train'
@@ -18,10 +20,8 @@ if __name__ == "__main__":
         vocab_size=vocab_size,
         special_tokens=["<|endoftext|>"],
         num_processes=16,
-    #    pre_tokenizer_pattern = pre_tokenizer_pattern
+        pre_tokenizer_pattern = pre_tokenizer_pattern
     )
-
-    should_print = False
 
     if should_print:
         byte_to_unicode = gpt2_bytes_to_unicode()
