@@ -6,10 +6,10 @@ from utils import stopwatch
 #pre_tokenizer_pattern = r"""(?:\w+)"""
 
 vocab_size = 10_000
-prefix = 'data/TinyStoriesV2-GPT4-validate'
+prefix = 'data/TinyStoriesV2-GPT4-valid'
 prefix = 'data/TinyStoriesV2-GPT4-train'
-vocab_size = 32_000
-prefix = 'data/owt_valid'
+#vocab_size = 32_000
+#prefix = 'data/owt_valid'
 #prefix = 'data/owt-train'
 
 vocab, merge_list = stopwatch(bpe.train_bpe)(

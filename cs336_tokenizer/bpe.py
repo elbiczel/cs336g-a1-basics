@@ -1,7 +1,7 @@
 import os
 import regex as re
 from collections import defaultdict
-from typing import BinaryIO, Dict, Tuple, Iterator
+from typing import BinaryIO, Dict, Tuple, Iterator, Optional
 
 from cs336_basics.common_types import BytePair, MergeList, Vocab
 
@@ -69,6 +69,8 @@ def _merge_freqs(master: Dict[Tuple[bytes, ...], int], additional: Dict[Tuple[by
         master[k] += v
     return master
 
+# 1 call - 4.5s on TinyStories valid dataset.
+# 1 call - 464s on TinyStories train dataset. Becomes ~30% of program execution.
 def _pre_tokenize_input(input_path: str | os.PathLike, special_token: bytes, specials_re, pre_tokenization_re, num_processes) -> Dict[Tuple[bytes, ...], int]:
     freqs = defaultdict(int)
     with open(input_path, "rb") as f:
@@ -82,21 +84,38 @@ def _pre_tokenize_input(input_path: str | os.PathLike, special_token: bytes, spe
     return freqs
 
 def _byte_pairs(b: Tuple[bytes, ...]) -> Iterator[BytePair]:
-    for x, y in zip(b[:-1], b[1:]):
-        yield (x, y)
+    # Only for len(b) > 2
+    # Zero-copy adjacent pairs (no slicing)
+    it = iter(b)
+    prev = next(it)
+    for cur in it:
+        yield (prev, cur)
+        prev = cur
 
+# Total time: 77s with 10k calls, each 0.0079s on TinyStories Valid dataset.
+# Total time: 686s with 10k calls, each 0.079s on TinyStories Train dataset. ~60% of total execution time.
 def _find_merge(freqs: Dict[Tuple[bytes, ...], int]) -> BytePair | None:
-    successive_pairs = defaultdict(int)
-    for b, freq in freqs.items():
-      for p in _byte_pairs(b):
-          successive_pairs[p] += freq
-    if not successive_pairs:
+    counts: Dict[BytePair, int] = {}
+    best_pair: Optional[BytePair] = None
+    best_count = 0
+    for seq, freq in freqs.items():
+        if freq <= 0 or len(seq) < 2:
+            continue
+        # Inline the tight loop; use locals for speed
+        get = counts.get
+        setitem = counts.__setitem__
+
+        for bp in _byte_pairs(seq):
+            c = get(bp, 0) + freq
+            setitem(bp, c)
+
+            if c > best_count or (c == best_count and (best_pair is None or bp > best_pair)):
+                best_count = c
+                best_pair = bp
+    
+    if best_count <= 1:
         return None
-    max_freq = max(successive_pairs.values())
-    if max_freq == 1:
-        return None
-    merge_candidates = [p for p, freq in successive_pairs.items() if freq == max_freq]
-    return max(merge_candidates)
+    return best_pair
 
 def _apply_merge_to_bytes(b: Tuple[bytes, ...], merge: BytePair) -> Tuple[bytes, ...]:
     ret_value = []
@@ -114,7 +133,8 @@ def _apply_merge_to_bytes(b: Tuple[bytes, ...], merge: BytePair) -> Tuple[bytes,
     ret_value += b[prev_merge:]
     return tuple(ret_value)
 
-
+# Total time: 43s with 10k calls, each 0.0044s on TinyStories Valid dataset.
+# Total time: 256s with 10k calls, each 0.026s on TinyStories Train dataset. <30% of execution time.
 def _apply_merge(freqs: Dict[Tuple[bytes, ...], int], merge: BytePair) -> Dict[Tuple[bytes, ...], int]:
     new_freqs = defaultdict(int, freqs)
     for b, freq in freqs.items():
