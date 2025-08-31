@@ -1,6 +1,7 @@
 import os
 import regex as re
 from collections import defaultdict
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import BinaryIO, Dict, Tuple, Iterator, Optional
 
 from cs336_basics.common_types import BytePair, MergeList, Vocab
@@ -56,31 +57,33 @@ def _pretoken_to_key(text: str) -> Tuple[bytes, ...]:
 
 PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
 
-def _get_chunk_freqs(text: str, specials_re, pre_tokenization_re) -> Dict[Tuple[bytes, ...], int]:
-    freqs = defaultdict(int)
-    parts = re.split(specials_re, text)
-    for part in parts:
-        for pre_token in re.finditer(pre_tokenization_re, part):
-            freqs[_pretoken_to_key(pre_token.group())] += 1
-    return freqs
+def _get_chunk_freqs(input_path: str | os.PathLike, start: int, end: int, specials_re, pre_tokenization_re) -> Dict[Tuple[bytes, ...], int]:
+    with open(input_path, "rb") as f:
+        f.seek(start)
+        chunk = f.read(end - start).decode("utf-8", errors="ignore")
+        freqs = defaultdict(int)
+        parts = re.split(specials_re, chunk)
+        for part in parts:
+            for pre_token in re.finditer(pre_tokenization_re, part):
+                freqs[_pretoken_to_key(pre_token.group())] += 1
+        return freqs
 
 def _merge_freqs(master: Dict[Tuple[bytes, ...], int], additional: Dict[Tuple[bytes, ...], int]) -> Dict[Tuple[bytes, ...], int]:
     for k, v in additional.items():
         master[k] += v
     return master
 
-# 1 call - 4.5s on TinyStories valid dataset.
-# 1 call - 464s on TinyStories train dataset. Becomes ~30% of program execution.
+# 1 call - 48s with 16 processes on TinyStories train dataset.
 def _pre_tokenize_input(input_path: str | os.PathLike, special_token: bytes, specials_re, pre_tokenization_re, num_processes) -> Dict[Tuple[bytes, ...], int]:
     freqs = defaultdict(int)
+
     with open(input_path, "rb") as f:
         boundaries = find_chunk_boundaries(f, num_processes, special_token)
-        # TODO: Parallelize.
-        for start, end in zip(boundaries[:-1], boundaries[1:]):
-            f.seek(start)
-            chunk = f.read(end - start).decode("utf-8", errors="ignore")
-            chunk_freqs = _get_chunk_freqs(chunk, specials_re, pre_tokenization_re)
-            _merge_freqs(freqs, chunk_freqs)
+    
+    with ProcessPoolExecutor(max_workers=num_processes) as pool:
+        chunk_freqs_futures = [pool.submit(_get_chunk_freqs, input_path, start, end, specials_re, pre_tokenization_re) for start, end in zip(boundaries[:-1], boundaries[1:])]
+    for fut in as_completed(chunk_freqs_futures):
+        _merge_freqs(freqs, fut.result())
     return freqs
 
 def _byte_pairs(b: Tuple[bytes, ...]) -> Iterator[BytePair]:
