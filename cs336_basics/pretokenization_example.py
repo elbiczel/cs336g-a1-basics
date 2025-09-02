@@ -9,20 +9,20 @@ should_print = False
 vocab_size = 10_000
 prefix = 'data/bpe_sample'
 prefix = 'data/TinyStoriesV2-GPT4-valid'
-# ~1 mins to complete
+# ~1 mins to complete (53.611s + 1.194s)
 prefix = 'data/TinyStoriesV2-GPT4-train'
 vocab_size = 32_000
-# ~8 mins to complete
+# ~30s to complete (7.495s + 21.146s)
 prefix = 'data/owt_valid'
-# 52 mins to complete
-#prefix = 'data/owt_train'
+# ~10 mins to complete (372.953s + 260.579s)
+prefix = 'data/owt_train'
 
 if __name__ == "__main__":
     vocab, merge_list = stopwatch(bpe.train_bpe)(
         input_path=f"{prefix}.txt",
         vocab_size=vocab_size,
         special_tokens=["<|endoftext|>"],
-        num_processes=16,
+        num_processes=10,
         pre_tokenizer_pattern = pre_tokenizer_pattern
     )
 

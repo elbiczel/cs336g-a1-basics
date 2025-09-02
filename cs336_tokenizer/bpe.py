@@ -1,5 +1,6 @@
 import os
 import regex as re
+import heapq
 from collections import defaultdict, Counter
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import BinaryIO, Dict, Tuple, Iterator, Optional, Iterable, Iterable, List
@@ -116,31 +117,71 @@ def _byte_pairs(b: Tuple[bytes, ...]) -> Iterator[BytePair]:
         yield (prev, cur)
         prev = cur
 
-def _init_byte_pair_freqs(sequences: List[Tuple[Tuple[bytes, ...], int]]) -> tuple[Dict[BytePair, int], Dict[BytePair, Counter[int]]]:
+
+class NegBytePair:
+    def __init__(self, data: BytePair): self.data = data
+    def __lt__(self, other):  # reverse lexicographic for max tie-breaks
+        return self.data > other.data
+    def __repr__(self): return repr(self.data)
+
+
+class BytePairQueue:
+    def __init__(self, bp_counts: Dict[BytePair, int]):
+        self.heap = []  # entries: (-freq, NegTuple(data), version)
+        self.entry = {}  # bp -> (freq, current_version)
+        for bp, freq in bp_counts.items():
+            self.entry[bp] = (freq, 0)
+            self.heap.append((-freq, NegBytePair(bp), 0))
+        heapq.heapify(self.heap)
+
+    def _discard_stale(self):
+        # pop stale entries until top is current
+        while self.heap:
+            neg_freq, neg_bp, ver = self.heap[0]
+            cur_freq, cur_ver = self.entry[neg_bp.data]
+            if cur_ver == ver and -neg_freq == cur_freq:
+                return                 # top is fresh
+            heapq.heappop(self.heap)
+
+    def pop(self) -> BytePair | None:
+        self._discard_stale()
+        if not self.heap: return None
+        neg_freq, neg_bp, _ = heapq.heappop(self.heap)
+        if neg_freq > -2:
+            # Nothing more to merge.
+            return None
+        del self.entry[neg_bp.data]
+        return neg_bp.data
+    
+    def insert_or_inc(self, bp: BytePair, delta: int):
+        freq, v = self.entry.get(bp, (0, 0))
+        freq += delta
+        v += 1
+        self.entry[bp] = (freq, v)
+        heapq.heappush(self.heap, (-freq, NegBytePair(bp), v))
+
+
+def _init_byte_pair_freqs(sequences: List[Tuple[Tuple[bytes, ...], int]]) -> tuple[BytePairQueue, Dict[BytePair, Counter[int]]]:
     counts: Dict[BytePair, int] = {}
     occurances: Dict[BytePair, Counter[int]] = {}
+    # Inline the tight loop; use locals for speed
+    get = counts.get
+    setitem = counts.__setitem__
+
     for i, (seq, freq) in enumerate(sequences):
         if len(seq) < 2: continue
-        # Inline the tight loop; use locals for speed
-        get = counts.get
-        setitem = counts.__setitem__
         for bp in _byte_pairs(seq):
             # We could track the offset of the bp in occurances as well.
             # This would allow us for simpler apply_merge_to_seq implementation.
             # But would require dynamic updates to the offset after merging.
             occurances.setdefault(bp, Counter())[i] += 1
             setitem(bp, get(bp, 0) + freq)
-    return counts, occurances
+    # Remove the tail of rare byte pairs that will never be used.
+    for bp in [bp for (bp, freq) in counts.items() if freq == 1]:
+        del counts[bp]
+        del occurances[bp]
+    return BytePairQueue(counts), occurances
 
-
-def _find_merge(byte_pair_freqs: Dict[BytePair, int]) -> BytePair | None:
-    best_pair: Optional[BytePair] = None
-    best_count = 2
-    for bp, c in byte_pair_freqs.items():
-        if c > best_count or (c == best_count and (best_pair is None or bp > best_pair)):
-            best_count = c
-            best_pair = bp
-    return best_pair
 
 def _apply_merge_to_seq(seq: Tuple[bytes, ...], merge: BytePair) -> tuple[Tuple[bytes, ...], Dict[BytePair, int]]:
     ret_value = []
@@ -169,18 +210,21 @@ def _apply_merge_to_seq(seq: Tuple[bytes, ...], merge: BytePair) -> tuple[Tuple[
 def _apply_merge(
         sequences: List[Tuple[Tuple[bytes, ...], int]],
         occurances: Dict[BytePair, Counter[int]],
-        byte_pair_freqs: Dict[BytePair, int],
+        bp_queue: BytePairQueue,
         merge: BytePair):
-    del byte_pair_freqs[merge]
     seq_ids = set(occurances[merge].keys())
+    # Computing deltas across all sequences to reduce heap operations.
+    deltas = defaultdict(int)
     for i in seq_ids:
         seq, freq = sequences[i]
-        new_seq, deltas = _apply_merge_to_seq(seq, merge)
+        new_seq, seq_deltas = _apply_merge_to_seq(seq, merge)
         if new_seq:
             sequences[i] = (new_seq, freq)
-        for bp, delta in deltas.items():
-            byte_pair_freqs[bp] = byte_pair_freqs.get(bp, 0) + delta * freq
+        for bp, delta in seq_deltas.items():
+            deltas[bp] += delta * freq
             occurances.setdefault(bp, Counter())[i] += delta
+    for bp, delta in deltas.items():
+        bp_queue.insert_or_inc(bp, delta)
     del occurances[merge]
 
 
@@ -188,16 +232,16 @@ def _train_bpe(vocab_size: int,
                vocab: dict[int, bytes],
                sequences: List[Tuple[Tuple[bytes, ...], int]]) -> tuple[Vocab, MergeList]:
     merge_list = []
-    byte_pair_freqs, occurances = _init_byte_pair_freqs(sequences)
+    bp_queue, occurances = _init_byte_pair_freqs(sequences)
     for _ in range(vocab_size - len(vocab)):
         # Note: This could be optimized using a heap.
-        merge = _find_merge(byte_pair_freqs)
+        merge = bp_queue.pop()
         if not merge:
             break
         merge_list.append(merge)
         vocab[len(vocab)] = merge[0] + merge[1]
         # Changes input collections in place.
-        _apply_merge(sequences, occurances, byte_pair_freqs, merge)
+        _apply_merge(sequences, occurances, bp_queue, merge)
     return (vocab, merge_list)
 
 def train_bpe(
