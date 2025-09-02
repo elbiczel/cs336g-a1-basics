@@ -9,12 +9,12 @@ should_print = False
 vocab_size = 10_000
 prefix = 'data/bpe_sample'
 prefix = 'data/TinyStoriesV2-GPT4-valid'
-# ~1 mins to complete (53.611s + 1.194s)
+# ~1 mins to complete (50.292s + 1.194s)
 prefix = 'data/TinyStoriesV2-GPT4-train'
 vocab_size = 32_000
-# ~30s to complete (7.495s + 21.146s)
+# ~30s to complete (7.335s + 21.349s)
 prefix = 'data/owt_valid'
-# ~10 mins to complete (372.953s + 260.579s)
+# ~10 mins to complete (329.149s + 260.579s)
 prefix = 'data/owt_train'
 
 if __name__ == "__main__":

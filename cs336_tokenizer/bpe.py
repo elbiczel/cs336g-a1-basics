@@ -61,9 +61,8 @@ def _pretoken_to_key(text: str) -> Tuple[bytes, ...]:
 PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
 
 def _get_pretokenized_sequence(text: str, specials_re, pre_tokenization_re, yield_specials: bool = True) -> Iterator[str]:
-    special_iter = specials_re.finditer(text)
     pos = 0
-    for sm in special_iter:
+    for sm in specials_re.finditer(text) if specials_re else []:
         # normal chunk before the special
         for tm in pre_tokenization_re.finditer(text, pos, sm.start()):
             yield tm.group(0)
@@ -75,13 +74,21 @@ def _get_pretokenized_sequence(text: str, specials_re, pre_tokenization_re, yiel
     for tm in pre_tokenization_re.finditer(text, pos):
         yield tm.group(0)
 
-def _get_chunk_freqs(input_path: str | os.PathLike, start: int, end: int, specials_re, pre_tokenization_re) -> Dict[Tuple[bytes, ...], int]:
+def _get_chunk_freqs(
+        input_path: str | os.PathLike,
+        start: int,
+        end: int,
+        special_token: bytes,
+        specials_re,
+        pre_tokenization_re) -> Dict[Tuple[bytes, ...], int]:
     with open(input_path, "rb") as f:
         f.seek(start)
-        chunk = f.read(end - start).decode("utf-8", errors="ignore")
+        chunk = f.read(end - start)
         freqs = defaultdict(int)
-        for pre_token in _get_pretokenized_sequence(chunk, specials_re, pre_tokenization_re, False):
-            freqs[_pretoken_to_key(pre_token)] += 1
+        for doc in chunk.split(special_token):
+            doc = doc.decode("utf-8", errors="ignore")
+            for pre_token in _get_pretokenized_sequence(doc, specials_re, pre_tokenization_re, False):
+                freqs[_pretoken_to_key(pre_token)] += 1
         return freqs
 
 def _merge_freqs(master: Dict[Tuple[bytes, ...], int], additional: Dict[Tuple[bytes, ...], int]) -> Dict[Tuple[bytes, ...], int]:
@@ -103,7 +110,7 @@ def _pre_tokenize_input(
         boundaries = find_chunk_boundaries(f, num_processes, special_token)
     
     with ProcessPoolExecutor(max_workers=num_processes) as pool:
-        chunk_freqs_futures = [pool.submit(_get_chunk_freqs, input_path, start, end, specials_re, pre_tokenization_re) for start, end in zip(boundaries[:-1], boundaries[1:])]
+        chunk_freqs_futures = [pool.submit(_get_chunk_freqs, input_path, start, end, special_token, specials_re, pre_tokenization_re) for start, end in zip(boundaries[:-1], boundaries[1:])]
     for fut in as_completed(chunk_freqs_futures):
         _merge_freqs(freqs, fut.result())
     return [(k, v) for k, v in freqs.items()]
@@ -250,18 +257,21 @@ def train_bpe(
     special_tokens: list[str],
     **kwargs,
 ) -> tuple[Vocab, MergeList]:
+    # Basic vocab.
+    vocab = {i: t.encode("utf-8") for i, t in enumerate(special_tokens)}
+    vocab |= {i+len(vocab): bytes([i]) for i in range(256)}
+
     num_processes = kwargs["num_processes"]
     pre_tokenization_re = kwargs["pre_tokenizer_pattern"] if "pre_tokenizer_pattern" in kwargs else None
     pre_tokenization_re = pre_tokenization_re or PAT
     pre_tokenization_re = re.compile(pre_tokenization_re)
-    special_token = b"<|endoftext|>" if "<|endoftext|>" in special_tokens else special_tokens[0].encode("utf-8")
-    special_tokens = sorted(special_tokens, key=len, reverse=True)
-    specials_re = re.compile("(" + "|".join(re.escape(t) for t in special_tokens) + ")")
-
-    # Basic vocab.
-    vocab = {i: t.encode("utf-8") for i, t in enumerate(special_tokens)}
-    vocab |= {i+len(vocab): bytes([i]) for i in range(256)}
+    special_token = "<|endoftext|>" if "<|endoftext|>" in special_tokens else special_tokens[0]
     
+    special_tokens = [t for t in special_tokens if t != special_token]
+    special_tokens = sorted(special_tokens, key=len, reverse=True)
+    specials_re = re.compile("(" + "|".join(re.escape(t) for t in special_tokens) + ")") if special_tokens else None
+    special_token = special_token.encode("utf-8")
+
     sequences = stopwatch(_pre_tokenize_input)(input_path, special_token, specials_re, pre_tokenization_re, num_processes)
     return stopwatch(_train_bpe)(vocab_size, vocab, sequences)
 
