@@ -4,8 +4,9 @@ from collections import defaultdict, Counter
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import BinaryIO, Dict, Tuple, Iterator, Optional, Iterable, Iterable, List
 
-from cs336_basics.common_types import BytePair, MergeList, Vocab
 from cs336_basics import token_utils
+from cs336_basics.utils import stopwatch
+from cs336_basics.common_types import BytePair, MergeList, Vocab
 
 def find_chunk_boundaries(
     file: BinaryIO,
@@ -94,7 +95,8 @@ def _pre_tokenize_input(
         specials_re,
         pre_tokenization_re,
         num_processes) -> List[Tuple[Tuple[bytes, ...], int]]:
-    raw_freqs = defaultdict(int)
+    # Note: Interenstingly usage of Counter was slower here.
+    freqs = defaultdict(int)
 
     with open(input_path, "rb") as f:
         boundaries = find_chunk_boundaries(f, num_processes, special_token)
@@ -102,8 +104,8 @@ def _pre_tokenize_input(
     with ProcessPoolExecutor(max_workers=num_processes) as pool:
         chunk_freqs_futures = [pool.submit(_get_chunk_freqs, input_path, start, end, specials_re, pre_tokenization_re) for start, end in zip(boundaries[:-1], boundaries[1:])]
     for fut in as_completed(chunk_freqs_futures):
-        _merge_freqs(raw_freqs, fut.result())
-    return [(k, v) for k, v in raw_freqs.items()]
+        _merge_freqs(freqs, fut.result())
+    return [(k, v) for k, v in freqs.items()]
 
 def _byte_pairs(b: Tuple[bytes, ...]) -> Iterator[BytePair]:
     # Only for len(b) > 2
@@ -182,6 +184,22 @@ def _apply_merge(
     del occurances[merge]
 
 
+def _train_bpe(vocab_size: int,
+               vocab: dict[int, bytes],
+               sequences: List[Tuple[Tuple[bytes, ...], int]]) -> tuple[Vocab, MergeList]:
+    merge_list = []
+    byte_pair_freqs, occurances = _init_byte_pair_freqs(sequences)
+    for _ in range(vocab_size - len(vocab)):
+        # Note: This could be optimized using a heap.
+        merge = _find_merge(byte_pair_freqs)
+        if not merge:
+            break
+        merge_list.append(merge)
+        vocab[len(vocab)] = merge[0] + merge[1]
+        # Changes input collections in place.
+        _apply_merge(sequences, occurances, byte_pair_freqs, merge)
+    return (vocab, merge_list)
+
 def train_bpe(
     input_path: str | os.PathLike,
     vocab_size: int,
@@ -200,22 +218,8 @@ def train_bpe(
     vocab = {i: t.encode("utf-8") for i, t in enumerate(special_tokens)}
     vocab |= {i+len(vocab): bytes([i]) for i in range(256)}
     
-    # Pre tokenize the input.
-    sequences = _pre_tokenize_input(input_path, special_token, specials_re, pre_tokenization_re, num_processes)
-
-    # Find merges
-    merge_list = []
-    byte_pair_freqs, occurances = _init_byte_pair_freqs(sequences)
-    for _ in range(vocab_size - len(vocab)):
-        merge = _find_merge(byte_pair_freqs)
-        if not merge:
-            break
-        merge_list.append(merge)
-        vocab[len(vocab)] = merge[0] + merge[1]
-        # Changes input collections in place.
-        _apply_merge(sequences, occurances, byte_pair_freqs, merge)
-
-    return (vocab, merge_list)
+    sequences = stopwatch(_pre_tokenize_input)(input_path, special_token, specials_re, pre_tokenization_re, num_processes)
+    return stopwatch(_train_bpe)(vocab_size, vocab, sequences)
 
 class Tokenizer:
     MALFORMED_CHAR_BYTES = "�".encode("utf-8")

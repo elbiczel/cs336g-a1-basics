@@ -15,7 +15,7 @@ vocab_size = 32_000
 # ~8 mins to complete
 prefix = 'data/owt_valid'
 # 52 mins to complete
-prefix = 'data/owt_train'
+#prefix = 'data/owt_train'
 
 if __name__ == "__main__":
     vocab, merge_list = stopwatch(bpe.train_bpe)(
