@@ -1,13 +1,13 @@
-from bpe import Tokenizer
+from bpe import TrieTokenizer
 from cs336_basics import io
 import time
 
-tiny_stories_tokenizer = Tokenizer.from_files(
+tiny_stories_tokenizer = TrieTokenizer.from_files(
     "/Users/tomek/Coding/cs336g-a1-basics/data/TinyStoriesV2-GPT4-train-vocab.json",
     "/Users/tomek/Coding/cs336g-a1-basics/data/TinyStoriesV2-GPT4-train-merges.txt",
     special_tokens=[b"<|endoftext|>"],
 )
-owt_tokenizer = Tokenizer.from_files(
+owt_tokenizer = TrieTokenizer.from_files(
     "/Users/tomek/Coding/cs336g-a1-basics/data/owt_train-vocab.json",
     "/Users/tomek/Coding/cs336g-a1-basics/data/owt_train-merges.txt",
     special_tokens=[b"<|endoftext|>"],
@@ -19,8 +19,6 @@ tiny_stories_sample = io.sample_docs(
 owt_sample = io.sample_docs(
     "/Users/tomek/Coding/cs336g-a1-basics/data/owt_train.txt",
     10, b"<|endoftext|>")
-
-print("Loaded data...")
 
 def get_stats(docs, tokenizer):
     token_num = 0
@@ -43,10 +41,26 @@ print("TS-Tokenizer on OWT data Compression ratio: %.3f Bytes per Token. %.3f MB
 print("OWT-Tokenizer on TS Compression ratio: %.3f Bytes per Token. %.3f MB/Sec" % get_stats(tiny_stories_sample, owt_tokenizer))
 
 ### Outputs:
-# TS Compression ratio: 4.099 Bytes per Token. 0.022 MB/Sec
-# OWT Compression ratio: 4.628 Bytes per Token. 0.007 MB/Sec
-# TS-Tokenizer on OWT data Compression ratio: 3.196 Bytes per Token. 0.012 MB/Sec
-# OWT-Tokenizer on TS Compression ratio: 3.903 Bytes per Token. 0.006 MB/Sec
+# TS Compression ratio: 4.145 Bytes per Token. 6.906 MB/Sec
+# OWT Compression ratio: 4.326 Bytes per Token. 7.398 MB/Sec
+# TS-Tokenizer on OWT data Compression ratio: 3.249 Bytes per Token. 7.011 MB/Sec
+# OWT-Tokenizer on TS Compression ratio: 4.019 Bytes per Token. 7.319 MB/Sec
 
-print(tiny_stories_sample[0])
-print(tiny_stories_tokenizer.encode(tiny_stories_sample[0]))
+#print(tiny_stories_sample[0])
+#print(tiny_stories_tokenizer.encode(tiny_stories_sample[0]))
+
+test_tokenizer = TrieTokenizer.from_files(
+    "/Users/tomek/Coding/cs336g-a1-basics/tests/fixtures/gpt2_vocab.json",
+    "/Users/tomek/Coding/cs336g-a1-basics/tests/fixtures/gpt2_merges.txt",
+    special_tokens=None,
+)
+test_string = """Die Leland"""
+encoded_ids = test_tokenizer.encode(test_string)
+print(encoded_ids)
+decoded_string = test_tokenizer.decode(encoded_ids)
+
+import tiktoken
+reference_tokenizer = tiktoken.get_encoding("gpt2")
+reference_ids = reference_tokenizer.encode(test_string)
+print("Ref ids: ", reference_ids)
+print("Decoded ref: ", test_tokenizer.decode(reference_ids))

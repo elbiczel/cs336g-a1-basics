@@ -14,19 +14,19 @@ def _pretoken_to_key(text: str) -> Tuple[bytes, ...]:
 
 PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
 
-def _get_pretokenized_sequence(text: str, specials_re, pre_tokenization_re, yield_specials: bool = True) -> Iterator[str]:
+def _get_pretokenized_sequence(text: str, specials_re, pre_tokenization_re, yield_specials: bool = True) -> Iterator[Tuple[str, bool]]:
     pos = 0
     for sm in specials_re.finditer(text) if specials_re else []:
         # normal chunk before the special
         for tm in pre_tokenization_re.finditer(text, pos, sm.start()):
-            yield tm.group(0)
+            yield (tm.group(0), False)
         # the special itself
         if yield_specials:
-            yield sm.group(0)
+            yield (sm.group(0), True)
         pos = sm.end()
     # tail after the last special
     for tm in pre_tokenization_re.finditer(text, pos):
-        yield tm.group(0)
+        yield (tm.group(0), False)
 
 def _get_chunk_freqs(
         input_path: str | os.PathLike,
@@ -41,7 +41,7 @@ def _get_chunk_freqs(
         freqs = defaultdict(int)
         for doc in chunk.split(special_token):
             doc = doc.decode("utf-8", errors="ignore")
-            for pre_token in _get_pretokenized_sequence(doc, specials_re, pre_tokenization_re, False):
+            for pre_token, _ in _get_pretokenized_sequence(doc, specials_re, pre_tokenization_re, False):
                 freqs[_pretoken_to_key(pre_token)] += 1
         return freqs
 
@@ -229,51 +229,86 @@ def train_bpe(
     sequences = stopwatch(_pre_tokenize_input)(input_path, special_token, specials_re, pre_tokenization_re, num_processes)
     return stopwatch(_train_bpe)(vocab_size, vocab, sequences)
 
-class Tokenizer:
+class VocabNode:
+    def __init__(self, token: int):
+        self.edges = [None] * 256
+        self.token = token
+
+class VocabTrie:
+    def __init__(self, reverse: dict[bytes, int], special_tokens: list[bytes]):
+        self._root = VocabNode(-1)
+        for seq, token in reverse.items():
+            if seq in special_tokens: continue
+            self._add_node(seq, token)
+
+    def next_token(self, seq: bytes, i: int) -> Tuple[int, int]:
+        seq_len = len(seq)
+        node = self._root
+        last_good_node = node
+        last_good_i = i
+        while i < seq_len:
+            next = node.edges[seq[i]]
+            if next == None:
+                return (last_good_node.token, last_good_i)
+            node = next
+            i += 1
+            if node.token != -1:
+                last_good_node = node
+                last_good_i = i
+        return (last_good_node.token, last_good_i)
+
+    def _add_node(self, seq: bytes, token: int):
+        node = self._root
+        for chr in seq:
+            next = node.edges[chr]
+            if next == None:
+                # Init with -1, it will be overriden later.
+                next = VocabNode(-1)
+                node.edges[chr] = next
+            node = next
+        node.token = token
+
+class TrieTokenizer:
     MALFORMED_CHAR_BYTES = "�".encode("utf-8")
 
-    def __init__(self, vocab: Vocab, merges: MergeList, special_tokens: list[bytes] | None = None):
+    def __init__(self, vocab: Vocab, _: MergeList, special_tokens: list[bytes] | None = None):
         self._vocab = dict(vocab)
-        self._merges = list(merges)
         self._sepcial_tokens = sorted(special_tokens, key=len, reverse=True) if special_tokens else []
-        self.init()
+        self._init()
 
     @classmethod
     def from_files(cls, vocab_filepath: str | os.PathLike, merges_filepath: str | os.PathLike, special_tokens: list[bytes] | None = None):
         vocab, merge_list = token_utils.load_vocab_and_merges(vocab_filepath, merges_filepath)
-        return Tokenizer(vocab, merge_list, special_tokens)
+        return TrieTokenizer(vocab, merge_list, special_tokens)
 
-    def init(self):
+    def _init(self):
         self._pre_tokenization_re = re.compile(PAT)
         if self._sepcial_tokens:
             self._specials_re = re.compile("(" + "|".join(re.escape(t.decode("utf-8")) for t in self._sepcial_tokens) + ")")
         else:
-            self._specials_re = re.compile(r'a^')
-        self._reverse = {seq: token for token, seq in self._vocab.items()}
-        if self._sepcial_tokens:
-            for t in self._sepcial_tokens:
-                if t not in self._reverse:
-                    self._reverse[t] = len(self._vocab)
-                    self._vocab[len(self._vocab)] = t
-        # TODO: Drop _merges and construct a Radix Tree out of vocab for encode optimization.
+            self._specials_re = None
+        reverse = {seq: token for token, seq in self._vocab.items()}
+        self._special_mapping = {}
+        for t in self._sepcial_tokens:
+            if t not in reverse:
+                reverse[t] = len(self._vocab)
+                self._vocab[len(self._vocab)] = t
+            self._special_mapping[t] = reverse[t]
+        self._trie = VocabTrie(reverse, self._sepcial_tokens)
 
     def encode(self, text: str) -> list[int]:
         out = []
 
-        for pre_token in _get_pretokenized_sequence(text, self._specials_re, self._pre_tokenization_re):
-            if re.match(self._specials_re, pre_token):
-                out.append(self._reverse[pre_token.encode("utf-8")])
+        for pre_token, is_special in _get_pretokenized_sequence(text, self._specials_re, self._pre_tokenization_re):
+            pre_token = pre_token.encode("utf-8")
+            if is_special:
+                out.append(self._special_mapping[pre_token])
                 continue
-            seq = list(_pretoken_to_key(pre_token))
-            for merge in self._merges:
-                i = 0
-                while i < len(seq) - 1:
-                    if seq[i] == merge[0] and seq[i+1] == merge[1]:
-                        seq = seq[:i] + [merge[0] + merge[1]] + seq[i+2:]
-                    i += 1
-                        
-            for b in seq:
-                out.append(self._reverse[b])
+            seq_len = len(pre_token)
+            i = 0
+            while i < seq_len:
+                token, i = self._trie.next_token(pre_token, i)
+                out.append(token)
 
         return out
     
