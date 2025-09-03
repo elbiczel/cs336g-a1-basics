@@ -3,7 +3,7 @@ import regex as re
 import heapq
 from collections import defaultdict, Counter
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from typing import Dict, Tuple, Iterator, Iterable, Iterable, List
+from typing import Dict, Tuple, Iterator, Iterable, Iterable, List, Optional, Set
 
 from cs336_basics import io, token_utils
 from cs336_basics.utils import stopwatch
@@ -84,46 +84,78 @@ class NegBytePair:
     def __lt__(self, other):  # reverse lexicographic for max tie-breaks
         return self.data > other.data
     def __repr__(self): return repr(self.data)
+    def __eq__(self, other):
+        if isinstance(other, NegBytePair):
+            return self.data == other.data
+        return False
+    def __hash__(self): return hash(self.data)
 
 
-class BytePairQueue:
-    def __init__(self, bp_counts: Dict[BytePair, int]):
-        self.heap = []  # entries: (-freq, NegTuple(data), version)
+class BytePairQueue[T]:
+    def __init__(self, data_with_ranks: Dict[T, int], min_order: bool=True, min_rank: Optional[int]=None):
+        self.heap = []  # entries: (-freq, data, version)
         self.entry = {}  # bp -> (freq, current_version)
-        for bp, freq in bp_counts.items():
-            self.entry[bp] = (freq, 0)
-            self.heap.append((-freq, NegBytePair(bp), 0))
+        self._min_order = min_order
+        self._min_rank = min_rank
+        if self._min_order and self._min_rank is not None:
+            self._min_rank = -1 * self._min_rank
+        for data, freq in data_with_ranks.items():
+            self.entry[data] = (freq, 0)
+            if not self._min_order:
+                freq *= -1
+            self.heap.append((freq, data, 0))
         heapq.heapify(self.heap)
+        
 
     def _discard_stale(self):
         # pop stale entries until top is current
         while self.heap:
-            neg_freq, neg_bp, ver = self.heap[0]
-            cur_freq, cur_ver = self.entry[neg_bp.data]
-            if cur_ver == ver and -neg_freq == cur_freq:
+            rank, data, ver = self.heap[0]
+            if not self._min_order:
+                rank *= -1
+            if data not in self.entry:
+                # Stale version.
+                heapq.heappop(self.heap)
+                continue
+            cur_freq, cur_ver = self.entry[data]
+            if cur_ver == ver and rank == cur_freq:
                 return                 # top is fresh
             heapq.heappop(self.heap)
 
-    def pop(self) -> BytePair | None:
+    def pop(self) -> T | None:
         self._discard_stale()
         if not self.heap: return None
-        neg_freq, neg_bp, _ = heapq.heappop(self.heap)
-        if neg_freq > -2:
-            # Nothing more to merge.
-            return None
-        del self.entry[neg_bp.data]
-        return neg_bp.data
+        rank, data, _ = heapq.heappop(self.heap)
+        if self._min_rank is not None:
+            # Nothing more to return
+            if rank > self._min_rank: return None
+        del self.entry[data]
+        return data
     
-    def insert_or_inc(self, bp: BytePair, delta: int):
-        freq, v = self.entry.get(bp, (0, 0))
-        freq += delta
+    def __bool__(self) -> bool:
+        return bool(self.entry)
+    
+    def insert_or_inc(self, data: T, delta: int):
+        rank, v = self.entry.get(data, (0, 0))
+        rank += delta
         v += 1
-        self.entry[bp] = (freq, v)
-        heapq.heappush(self.heap, (-freq, NegBytePair(bp), v))
+        self.entry[data] = (rank, v)
+        if not self._min_order:
+            rank *= -1
+        heapq.heappush(self.heap, (rank, data, v))
+    
+    def update(self, data: T, rank: int):
+        _, v = self.entry.get(data, (0, 0))
+        v += 1
+        self.entry[data] = (rank, v)
+        if not self._min_order:
+            rank *= -1
+        heapq.heappush(self.heap, (rank, data, v))
 
 
-def _init_byte_pair_freqs(sequences: List[Tuple[Tuple[bytes, ...], int]]) -> tuple[BytePairQueue, Dict[BytePair, Counter[int]]]:
-    counts: Dict[BytePair, int] = {}
+
+def _init_byte_pair_freqs(sequences: List[Tuple[Tuple[bytes, ...], int]]) -> tuple[BytePairQueue[NegBytePair], Dict[BytePair, Counter[int]]]:
+    counts: Dict[NegBytePair, int] = {}
     occurances: Dict[BytePair, Counter[int]] = {}
     # Inline the tight loop; use locals for speed
     get = counts.get
@@ -136,12 +168,13 @@ def _init_byte_pair_freqs(sequences: List[Tuple[Tuple[bytes, ...], int]]) -> tup
             # This would allow us for simpler apply_merge_to_seq implementation.
             # But would require dynamic updates to the offset after merging.
             occurances.setdefault(bp, Counter())[i] += 1
-            setitem(bp, get(bp, 0) + freq)
+            nbp = NegBytePair(bp)
+            setitem(nbp, get(nbp, 0) + freq)
     # Remove the tail of rare byte pairs that will never be used.
     for bp in [bp for (bp, freq) in counts.items() if freq == 1]:
         del counts[bp]
-        del occurances[bp]
-    return BytePairQueue(counts), occurances
+        del occurances[bp.data]
+    return BytePairQueue(counts, False, 2), occurances
 
 
 def _apply_merge_to_seq(seq: Tuple[bytes, ...], merge: BytePair) -> tuple[Tuple[bytes, ...], Dict[BytePair, int]]:
@@ -171,7 +204,7 @@ def _apply_merge_to_seq(seq: Tuple[bytes, ...], merge: BytePair) -> tuple[Tuple[
 def _apply_merge(
         sequences: List[Tuple[Tuple[bytes, ...], int]],
         occurances: Dict[BytePair, Counter[int]],
-        bp_queue: BytePairQueue,
+        bp_queue: BytePairQueue[NegBytePair],
         merge: BytePair):
     seq_ids = set(occurances[merge].keys())
     # Computing deltas across all sequences to reduce heap operations.
@@ -185,7 +218,7 @@ def _apply_merge(
             deltas[bp] += delta * freq
             occurances.setdefault(bp, Counter())[i] += delta
     for bp, delta in deltas.items():
-        bp_queue.insert_or_inc(bp, delta)
+        bp_queue.insert_or_inc(NegBytePair(bp), delta)
     del occurances[merge]
 
 
@@ -199,6 +232,7 @@ def _train_bpe(vocab_size: int,
         merge = bp_queue.pop()
         if not merge:
             break
+        merge = merge.data
         merge_list.append(merge)
         vocab[len(vocab)] = merge[0] + merge[1]
         # Changes input collections in place.
@@ -231,8 +265,8 @@ def train_bpe(
 
 class VocabNode:
     def __init__(self, token: int):
-        self.edges = [None] * 256
-        self.token = token
+        self.edges: List[Optional[VocabNode]] = [None] * 256
+        self.token: int = token
 
 class VocabTrie:
     def __init__(self, reverse: dict[bytes, int], special_tokens: list[bytes]):
@@ -309,6 +343,125 @@ class TrieTokenizer:
             while i < seq_len:
                 token, i = self._trie.next_token(pre_token, i)
                 out.append(token)
+
+        return out
+    
+    def encode_iterable(self, iterable: Iterable[str]) -> Iterator[int]:
+        for text in iterable:
+            for token in self.encode(text):
+                yield token
+    
+    def decode(self, ids: list[int]) -> str:
+        return b"".join([self._vocab.get(id, self.MALFORMED_CHAR_BYTES) for id in ids]).decode("utf-8", errors="replace")
+
+
+class ByteNode:
+    def __init__(self, data: bytes, offset: int):
+        self.prev: Optional[ByteNode] = None
+        self.next: Optional[ByteNode] = None
+        self.data: bytes = data
+        # For fast hash operations without iterating over all the prev/next nodes.
+        # Needs careful book-keeping, especially in the event of merges.
+        self.offset: int = offset
+    
+    def __eq__(self, other):
+        if isinstance(other, ByteNode):
+            return self.data == other.data and self.offset == other.offset
+        return False
+
+    def __hash__(self):
+        return hash((self.data, self.offset))
+
+    def __repr__(self):
+        return f"ByteNode({self.data}, {self.offset})"
+
+    def __lt__(self, other):
+        if isinstance(other, ByteNode):
+            # Note, this only makes sense if they are from the same list.
+            return self.offset < other.offset
+        return NotImplemented
+
+
+
+class MergeTokenizer:
+    MALFORMED_CHAR_BYTES = "�".encode("utf-8")
+
+    def __init__(self, vocab: Vocab, merges: MergeList, special_tokens: list[bytes] | None = None):
+        self._vocab = dict(vocab)
+        self._merge_ranks = {m: i for i, m in enumerate(merges)}
+        self._sepcial_tokens = sorted(special_tokens, key=len, reverse=True) if special_tokens else []
+        self._init()
+
+    @classmethod
+    def from_files(cls, vocab_filepath: str | os.PathLike, merges_filepath: str | os.PathLike, special_tokens: list[bytes] | None = None):
+        vocab, merge_list = token_utils.load_vocab_and_merges(vocab_filepath, merges_filepath)
+        return MergeTokenizer(vocab, merge_list, special_tokens)
+
+    def _init(self):
+        self._pre_tokenization_re = re.compile(PAT)
+        if self._sepcial_tokens:
+            self._specials_re = re.compile("(" + "|".join(re.escape(t.decode("utf-8")) for t in self._sepcial_tokens) + ")")
+        else:
+            self._specials_re = None
+        self._reverse = {seq: token for token, seq in self._vocab.items()}
+        if self._sepcial_tokens:
+            for t in self._sepcial_tokens:
+                if t not in self._reverse:
+                    self._reverse[t] = len(self._vocab)
+                    self._vocab[len(self._vocab)] = t
+
+    def encode(self, text: str) -> list[int]:
+        out = []
+
+        for pre_token, is_special in _get_pretokenized_sequence(text, self._specials_re, self._pre_tokenization_re):
+            if is_special:
+                out.append(self._reverse[pre_token.encode("utf-8")])
+                continue
+            seq = _pretoken_to_key(pre_token)
+            if len(seq) == 0: continue
+            if len(seq) == 1:
+                out.append(self._reverse[seq[0]])
+                continue
+            queue: BytePairQueue[Tuple[ByteNode, ByteNode]] = BytePairQueue({})
+            l = ByteNode(seq[0], 0)
+            prev = l
+            for i in range(1, len(seq)):
+                next = ByteNode(seq[i], i)
+                prev.next = next
+                next.prev = prev
+                bp = (prev.data, next.data)
+                if bp in self._merge_ranks:
+                    queue.update((prev, next), self._merge_ranks[bp])
+                prev = next
+            
+            while queue:
+                node_pair = queue.pop()
+                assert node_pair != None
+                x, y = node_pair
+                new_node = ByteNode(x.data + y.data, x.offset)
+                if x == l:
+                    l = new_node
+                prev = x.prev
+                next = y.next
+                new_node.prev = prev
+                new_node.next = next
+                if prev:
+                    prev_bp = (prev.data, new_node.data)
+                    if prev_bp in self._merge_ranks:
+                        queue.update((prev, new_node), self._merge_ranks[prev_bp])
+                    prev.next = new_node
+                    if (prev, x) in queue.entry:
+                        del queue.entry[(prev, x)]
+                if next:
+                    next_bp = (new_node.data, next.data)
+                    if next_bp in self._merge_ranks:
+                        queue.update((new_node, next), self._merge_ranks[next_bp])
+                    next.prev = new_node
+                    if (y, next) in queue.entry:
+                        del queue.entry[(y, next)]
+            while l != None:
+                out.append(self._reverse[l.data])
+                l = l.next
 
         return out
     
