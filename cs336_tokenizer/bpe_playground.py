@@ -69,21 +69,31 @@ print("OWT-Tokenizer on TS Compression ratio: %.3f Bytes per Token. %.3f MB/Sec"
 # TS-Tokenizer on OWT data Compression ratio: 3.190 Bytes per Token. 0.688 MB/Sec
 # OWT-Tokenizer on TS Compression ratio: 3.961 Bytes per Token. 0.627 MB/Sec
 
-#print(tiny_stories_sample[0])
-#print(tiny_stories_tokenizer.encode(tiny_stories_sample[0]))
+print(tiny_stories_sample[0])
+encoded_ids = tiny_stories_merge_tokenizer.encode(tiny_stories_sample[0])
+print("Ids: ", encoded_ids)
+decoded_story = tiny_stories_merge_tokenizer.decode(encoded_ids)
+print("Decoded: ", decoded_story)
+print("Is same: ", decoded_story == tiny_stories_sample[0])
 
-test_tokenizer = MergeTokenizer.from_files(
-    "/Users/tomek/Coding/cs336g-a1-basics/tests/fixtures/gpt2_vocab.json",
-    "/Users/tomek/Coding/cs336g-a1-basics/tests/fixtures/gpt2_merges.txt",
-    special_tokens=None,
-)
-test_string = """Die Leland"""
-encoded_ids = test_tokenizer.encode(test_string)
-print("Encoded ids: ", encoded_ids)
-decoded_string = test_tokenizer.decode(encoded_ids)
 
-import tiktoken
-reference_tokenizer = tiktoken.get_encoding("gpt2")
-reference_ids = reference_tokenizer.encode(test_string)
-print("Ref ids: ", reference_ids)
-print("Decoded ref: ", test_tokenizer.decode(reference_ids))
+
+prefixes = ['data/TinyStoriesV2-GPT4-valid', 'data/TinyStoriesV2-GPT4-train', 'data/owt_valid']
+for prefix in prefixes:
+    original_path = f"{prefix}.txt"
+    decoded_path = f"{prefix}-decoded.txt"
+    with open(original_path, "rb") as f:
+        orig_content = f.read()
+    with open(decoded_path, "rb") as f:
+        decoded_content = f.read()
+    print("Prefix: ", prefix, " matches: ", orig_content == decoded_content)
+prefixes = ['data/TinyStoriesV2-GPT4-valid', 'data/TinyStoriesV2-GPT4-train', 'data/owt_valid', 'data/owt_train']
+for prefix in prefixes:
+    original_path = f"{prefix}.txt"
+    decoded_path = f"{prefix}-trie-decoded.txt"
+    with open(original_path, "rb") as f:
+        orig_content = f.read()
+    with open(decoded_path, "rb") as f:
+        decoded_content = f.read()
+    print("Prefix: ", prefix, " trie-matches: ", orig_content == decoded_content)
+

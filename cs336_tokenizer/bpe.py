@@ -302,7 +302,19 @@ class VocabTrie:
             node = next
         node.token = token
 
-class TrieTokenizer:
+
+class Tokenizer:
+    def encode(self, text: str) -> list[int]:
+        raise NotImplementedError
+    
+    def encode_iterable(self, iterable: Iterable[str]) -> Iterator[int]:
+        raise NotImplementedError
+    
+    def decode(self, ids: list[int]) -> str:
+        raise NotImplementedError
+
+
+class TrieTokenizer(Tokenizer):
     MALFORMED_CHAR_BYTES = "�".encode("utf-8")
 
     def __init__(self, vocab: Vocab, _: MergeList, special_tokens: list[bytes] | None = None):
@@ -381,9 +393,7 @@ class ByteNode:
             return self.offset < other.offset
         return NotImplemented
 
-
-
-class MergeTokenizer:
+class MergeTokenizer(Tokenizer):
     MALFORMED_CHAR_BYTES = "�".encode("utf-8")
 
     def __init__(self, vocab: Vocab, merges: MergeList, special_tokens: list[bytes] | None = None):
