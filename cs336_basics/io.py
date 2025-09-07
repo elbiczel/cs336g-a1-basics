@@ -2,7 +2,7 @@ import numpy as np
 import os
 import random
 
-from typing import BinaryIO, Sequence, Optional, Iterator
+from typing import BinaryIO, Sequence, Optional, Iterator, Iterable
 
 _mini_chunk_size = 4096  # Read ahead by 4k bytes at a time
 
@@ -135,10 +135,33 @@ def sample_docs(path: str | os.PathLike, num: int, sep: bytes) -> Sequence[str]:
             docs.add(pos)
     return out
 
-def write_tokens(path: str | os.PathLike, tokens: list[int]):
-    arr = np.array(tokens, dtype=np.uint16)
-    arr = arr.astype('<u2', copy=False)   # standardize to little-endian
-    np.save(path, arr)
+class TokenWriter:
+    def __init__(self, path: str | os.PathLike, chunk_size: int = _mini_chunk_size):
+        self.path = path
+        self.chunk_size = chunk_size
+        self.buf = []
+        self.f = None
 
-def read_tokens(path: str | os.PathLike) -> list[int]:
-    return np.load(path, mmap_mode='r')
+    def __enter__(self):
+        self.f = open(self.path, "ab")
+        return self
+
+    def write(self, tokens: int | Iterator[int]):
+        assert self.f != None
+        if isinstance(tokens, int):
+            self.buf.append(tokens)
+        else:
+            self.buf.extend(tokens)
+        if len(self.buf) >= self.chunk_size:
+            np.asarray(self.buf, dtype="<u2").tofile(self.f)
+            self.buf.clear()
+
+    def __exit__(self, exc_type, exc, tb):
+        assert self.f != None
+        if self.buf:
+            np.asarray(self.buf, dtype="<u2").tofile(self.f)
+            self.buf.clear()
+        self.f.close()
+
+def read_tokens(path: str | os.PathLike) -> Iterable[int]:
+    return np.memmap(path, dtype="<u2", mode='r')

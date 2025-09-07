@@ -310,7 +310,10 @@ class Tokenizer:
     def encode_iterable(self, iterable: Iterable[str]) -> Iterator[int]:
         raise NotImplementedError
     
-    def decode(self, ids: list[int]) -> str:
+    def decode(self, ids: Iterable[int]) -> str:
+        raise NotImplementedError
+    
+    def decode_iterable(self, ids: Iterable[int]) -> Iterator[bytes]:
         raise NotImplementedError
 
 
@@ -363,8 +366,12 @@ class TrieTokenizer(Tokenizer):
             for token in self.encode(text):
                 yield token
     
-    def decode(self, ids: list[int]) -> str:
-        return b"".join([self._vocab.get(id, self.MALFORMED_CHAR_BYTES) for id in ids]).decode("utf-8", errors="replace")
+    def decode(self, ids: Iterable[int]) -> str:
+        return b"".join(self.decode_iterable(ids)).decode("utf-8", errors="replace")
+
+    def decode_iterable(self, ids: Iterable[int]) -> Iterator[bytes]:
+        for id in ids:
+            yield self._vocab.get(id, self.MALFORMED_CHAR_BYTES)
 
 
 class ByteNode:
@@ -480,5 +487,9 @@ class MergeTokenizer(Tokenizer):
             for token in self.encode(text):
                 yield token
     
-    def decode(self, ids: list[int]) -> str:
-        return b"".join([self._vocab.get(id, self.MALFORMED_CHAR_BYTES) for id in ids]).decode("utf-8", errors="replace")
+    def decode(self, ids: Iterable[int]) -> str:
+        return b"".join(self.decode_iterable(ids)).decode("utf-8", errors="replace")
+
+    def decode_iterable(self, ids: Iterable[int]) -> Iterator[bytes]:
+        for id in ids:
+            yield self._vocab.get(id, self.MALFORMED_CHAR_BYTES)
