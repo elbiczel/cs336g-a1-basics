@@ -4,25 +4,58 @@ import torch
 from torch import nn
 from einops import einsum
 
+def _compute_freqs_cis(
+        theta: float,
+        d_k: int,
+        max_seq_len: int,
+        device: Optional[torch.device]=None,
+        dtype: Optional[torch.dtype]=torch.float32) -> torch.Tensor:
+    inv_freq = (theta ** (torch.arange(0, d_k, 2, device=device, dtype=dtype) / d_k)).reciprocal()
+    # Precompute rotation angles for all possible sequence lengths.
+    t = torch.arange(max_seq_len, device=device, dtype=dtype)
+    freqs = einsum(t, inv_freq, "i, j -> i j")
+    # e^(1j * freqs)
+    freqs_cis = torch.polar(torch.ones_like(freqs), freqs)
+    return freqs_cis.to(torch.complex64 if dtype in (torch.float16, torch.bfloat16, torch.float32) else torch.complex128)
+
 
 class RoPE(nn.Module):
-    def __init__(self, theta: float, d_k: int, device: Optional[torch.device]=None):
+    def __init__(self, theta: float, d_k: int, max_seq_len: int, device: Optional[torch.device]=None, dtype: Optional[torch.dtype]=torch.float32):
         super().__init__()
-        self.register_buffer("thetas",  torch.pow(theta, -2 * torch.arange(d_k // 2, device=device) / d_k))
+        if d_k % 2 != 0:
+            raise ValueError(f"d_k must be even for RoPE, got {d_k}.")
+        self.register_buffer(
+            "freqs_cis",
+            _compute_freqs_cis(theta, d_k, max_seq_len, device, dtype),
+            persistent=False,
+        )
+        
 
-    def forward(self, x: torch.Tensor, token_positions: torch.Tensor) -> torch.Tensor:
-        # Upcast inputs to float32 if needed, complex32 is not supported for float16s.
-        float_type, complex_type = torch.float32, torch.complex64
-        if x.dtype == torch.float64:
-            float_type, complex_type = torch.float64, torch.complex128
-        x_pairs = x.view(*x.shape[:-1], -1, 2)
-        x_complex = x_pairs.contiguous().view(float_type).view(complex_type).squeeze(-1)
+    def forward(self, x: torch.Tensor, token_positions: Optional[torch.Tensor]) -> torch.Tensor:
+        orig_dtype = x.dtype
+        *prefix, seq, d_k = x.shape
+        if d_k % 2 != 0:
+            raise ValueError(f"Last dim must be even, got {d_k}.")
+        x_pairs = x.view(*prefix, seq, d_k // 2, 2)
+        # Upcast inputs to types supported by complex.
+        float_type = torch.float64 if orig_dtype == torch.float64 else torch.float32
+        x_complex = torch.view_as_complex(x_pairs.to(float_type))
         # The code above is for PyTorch 2.6.0.
         # Since 2.7.0 a simple `x.view(complex_type)` would suffice.
-        rotation_angle = einsum(token_positions, self.thetas, "... seq_len, d_k_half -> ... seq_len d_k_half")
-        rotations = torch.exp(1j * rotation_angle)
-        x_rotated_complex = x_complex * rotations
-        # The above is from Euler's fomrula:
-        # e^(i*rotation_angle) = cos(rotation_angle) + i*sin(rotation_angle)
-        # which after expansion is equivalent to the rotation matrices.
-        return x_rotated_complex.view(x.dtype)
+
+        # Select rotation factors
+        if token_positions is None:
+            token_positions = torch.arange(seq, device=x.device)
+        # Broadcast positions to shape [..., seq] then index
+        if token_positions.ndim == 1:
+            freqs_cis = self.freqs_cis[token_positions]
+            # expand to match prefix dims
+            while freqs_cis.ndim < x_complex.ndim:
+                freqs_cis = freqs_cis.unsqueeze(0)
+        else:
+            #flat_pos = token_positions.reshape(-1)
+            freqs_cis = self.freqs_cis[token_positions]
+        
+        x_rot = x_complex * freqs_cis
+        x_real = torch.view_as_real(x_rot).reshape(*prefix, seq, d_k)
+        return x_real.to(orig_dtype)

@@ -195,12 +195,11 @@ def run_multihead_self_attention_with_rope(
         Float[Tensor, " ... sequence_length d_out"]: Tensor with the output of running your optimized, batched multi-headed attention
         implementation with the given QKV projection weights and input features.
     """
-    rope = nn.rope.RoPE(theta, d_model // num_heads)
+    rope = nn.rope.RoPE(theta, d_model // num_heads, max_seq_len)
     layer = nn.attention.MultiHeadSelfAttention(d_model, num_heads, rope=rope)
     layer.load_state_dict({
         "qkv.weight": torch.cat([q_proj_weight, k_proj_weight, v_proj_weight]),
         "o_proj.weight": o_proj_weight,
-        "rope.thetas": rope.thetas,
     })
     return layer(in_features, token_positions)
 
@@ -224,7 +223,7 @@ def run_rope(
     Returns:
         Float[Tensor, " ... sequence_length d_k"]: Tensor with RoPEd input.
     """
-    layer = nn.rope.RoPE(theta, d_k)
+    layer = nn.rope.RoPE(theta, d_k, max_seq_len)
     return layer(in_query_or_key, token_positions)
 
 
@@ -298,12 +297,10 @@ def run_transformer_block(
         Float[Tensor, "batch sequence_length d_model"] Tensor with the output of
         running the Transformer block on the input features while using RoPE.
     """
-    rope = nn.rope.RoPE(theta, d_model // num_heads)
-    layer = nn.transformer.TransformerBlock(d_model, num_heads, d_ff, theta)
+    layer = nn.transformer.TransformerBlock(d_model, num_heads, d_ff, theta, max_seq_len)
     adj_weights = {
         "attn.qkv.weight": torch.cat([weights["attn.q_proj.weight"], weights["attn.q_proj.weight"], weights["attn.q_proj.weight"]]),
         "attn.o_proj.weight": weights["attn.output_proj.weight"],
-        "attn.rope.thetas": rope.thetas,
         "ffn.w1.weight": weights["ffn.w1.weight"],
         "ffn.w2.weight": weights["ffn.w2.weight"],
         "ffn.w3.weight": weights["ffn.w3.weight"],
@@ -395,7 +392,6 @@ def run_transformer_lm(
     """
     for k, v in weights.items():
         print(f"Weights: {k} with shape: {v.shape}")
-    rope = nn.rope.RoPE(rope_theta, d_model // num_heads)
     layer = nn.transformer.TransformerLM(vocab_size, context_length, num_layers, d_model, num_heads, d_ff, rope_theta)
     adj_weights = {
         "token_embeddings.weight": weights["token_embeddings.weight"],
@@ -406,7 +402,6 @@ def run_transformer_lm(
         adj_weights |= {
             f"layers.{i}.attn.qkv.weight": torch.cat([weights[f"layers.{i}.attn.q_proj.weight"], weights[f"layers.{i}.attn.q_proj.weight"], weights[f"layers.{i}.attn.q_proj.weight"]]),
             f"layers.{i}.attn.o_proj.weight": weights[f"layers.{i}.attn.output_proj.weight"],
-            f"layers.{i}.attn.rope.thetas": rope.thetas,
             f"layers.{i}.ffn.w1.weight": weights[f"layers.{i}.ffn.w1.weight"],
             f"layers.{i}.ffn.w2.weight": weights[f"layers.{i}.ffn.w2.weight"],
             f"layers.{i}.ffn.w3.weight": weights[f"layers.{i}.ffn.w3.weight"],
