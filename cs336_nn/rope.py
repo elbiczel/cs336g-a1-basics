@@ -6,7 +6,7 @@ from einops import einsum
 
 
 class RoPE(nn.Module):
-    def __init__(self, theta: float, d_k: int, _: int, device: Optional[torch.device]=None):
+    def __init__(self, theta: float, d_k: int, device: Optional[torch.device]=None):
         super().__init__()
         self.register_buffer("thetas",  torch.pow(theta, -2 * torch.arange(d_k // 2, device=device) / d_k))
 

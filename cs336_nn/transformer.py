@@ -1,0 +1,53 @@
+import torch
+from torch import nn
+
+from typing import Optional
+
+from cs336_nn import attention, activation, embedding, linear, rope, layer_norm
+from cs336_nn._utils import softmax     
+
+class TransformerBlock(nn.Module):
+    def __init__(self,
+                 d_model: int,
+                 num_heads: int,
+                 d_ff: int,
+                 theta: float,
+                 device: Optional[torch.device]=None,
+                 dtype: Optional[torch.dtype]=torch.float32):
+        super().__init__()
+        self.attn = attention.MultiHeadSelfAttention(d_model, num_heads, rope.RoPE(theta, d_model // num_heads, device), device, dtype)
+        self.ffn = activation.SwiGLU(d_model, d_ff, device, dtype)
+        self.ln1 = layer_norm.RMSNorm(d_model, device=device, dtype=dtype)
+        self.ln2 = layer_norm.RMSNorm(d_model, device=device, dtype=dtype)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        seq_len = x.shape[-2]
+        pos = torch.arange(seq_len, device=x.device)
+        h1 = x + self.attn(self.ln1(x), pos)
+        h2 = h1 + self.ffn(self.ln2(h1))
+        return h2
+
+
+class TransformerLM(nn.Module):
+    def __init__(self,
+                 vocab_size: int,
+                 context_length: int,
+                 num_layers: int,
+                 d_model: int,
+                 num_heads: int,
+                 d_ff: int,
+                 theta: float,
+                 device: Optional[torch.device]=None,
+                 dtype: Optional[torch.dtype]=torch.float32):
+        super().__init__()
+        self.token_embeddings = embedding.Embedding(vocab_size, d_model, device, dtype)
+        self.layers = nn.Sequential(*[TransformerBlock(d_model, num_heads, d_ff, theta, device, dtype) for i in range(num_layers)])
+        self.ln_final = layer_norm.RMSNorm(d_model, device=device, dtype=dtype)
+        self.lm_head = linear.Linear(d_model, vocab_size, device, dtype)
+
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        emb = self.token_embeddings(x)
+        h1 = self.layers(emb)
+        h2 = self.lm_head(self.ln_final(h1))
+        return softmax(h2, -1)
