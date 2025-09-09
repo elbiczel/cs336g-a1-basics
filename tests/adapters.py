@@ -299,7 +299,7 @@ def run_transformer_block(
     """
     layer = nn.transformer.TransformerBlock(d_model, num_heads, d_ff, theta, max_seq_len)
     adj_weights = {
-        "attn.qkv.weight": torch.cat([weights["attn.q_proj.weight"], weights["attn.q_proj.weight"], weights["attn.q_proj.weight"]]),
+        "attn.qkv.weight": torch.cat([weights["attn.q_proj.weight"], weights["attn.k_proj.weight"], weights["attn.v_proj.weight"]]),
         "attn.o_proj.weight": weights["attn.output_proj.weight"],
         "ffn.w1.weight": weights["ffn.w1.weight"],
         "ffn.w2.weight": weights["ffn.w2.weight"],
@@ -400,7 +400,7 @@ def run_transformer_lm(
     }
     for i in range(num_layers):
         adj_weights |= {
-            f"layers.{i}.attn.qkv.weight": torch.cat([weights[f"layers.{i}.attn.q_proj.weight"], weights[f"layers.{i}.attn.q_proj.weight"], weights[f"layers.{i}.attn.q_proj.weight"]]),
+            f"layers.{i}.attn.qkv.weight": torch.cat([weights[f"layers.{i}.attn.q_proj.weight"], weights[f"layers.{i}.attn.k_proj.weight"], weights[f"layers.{i}.attn.v_proj.weight"]]),
             f"layers.{i}.attn.o_proj.weight": weights[f"layers.{i}.attn.output_proj.weight"],
             f"layers.{i}.ffn.w1.weight": weights[f"layers.{i}.ffn.w1.weight"],
             f"layers.{i}.ffn.w2.weight": weights[f"layers.{i}.ffn.w2.weight"],

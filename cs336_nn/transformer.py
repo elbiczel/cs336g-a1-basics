@@ -40,13 +40,14 @@ class TransformerLM(nn.Module):
                  dtype: Optional[torch.dtype]=torch.float32):
         super().__init__()
         self.token_embeddings = embedding.Embedding(vocab_size, d_model, device, dtype)
-        self.layers = nn.Sequential(*[TransformerBlock(d_model, num_heads, d_ff, theta, context_length, device, dtype) for _ in range(num_layers)])
+        self.layers = nn.ModuleList([TransformerBlock(d_model, num_heads, d_ff, theta, context_length, device, dtype) for _ in range(num_layers)])
         self.ln_final = layer_norm.RMSNorm(d_model, device=device, dtype=dtype)
         self.lm_head = linear.Linear(d_model, vocab_size, device, dtype)
 
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        emb = self.token_embeddings(x)
-        h1 = self.layers(emb)
-        h2 = self.lm_head(self.ln_final(h1))
-        return softmax(h2, -1)
+        h = self.token_embeddings(x)
+        for block in self.layers:
+            h = block(h)
+        logits = self.lm_head(self.ln_final(h))
+        return logits
