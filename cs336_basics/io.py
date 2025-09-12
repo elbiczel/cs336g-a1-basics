@@ -1,6 +1,7 @@
 import numpy as np
 import os
 import random
+import numpy.typing as npt
 
 from typing import BinaryIO, Sequence, Optional, Iterator, Iterable
 
@@ -163,5 +164,5 @@ class TokenWriter:
             self.buf.clear()
         self.f.close()
 
-def read_tokens(path: str | os.PathLike) -> Iterable[int]:
+def read_tokens(path: str | os.PathLike) -> npt.NDArray[np.uint16]:
     return np.memmap(path, dtype="<u2", mode='r')
