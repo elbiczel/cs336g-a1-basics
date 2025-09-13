@@ -3,7 +3,56 @@ import torch
 import torch.nn.functional as F
 from torch.nn.utils.clip_grad import clip_grad_norm_
 
-from .adapters import run_cross_entropy, run_gradient_clipping, run_softmax
+from .adapters import run_cross_entropy, run_gradient_clipping, run_softmax, run_top_p_indices
+
+
+def test_top_p_indices():
+    # 1-d case
+    probs = torch.tensor([0.1, 0.2, 0.7])
+    keep = run_top_p_indices(probs, 0.5)
+    numpy.testing.assert_equal(
+        keep.detach().numpy(),
+        [False, False, True]
+    )
+    # Keep 2.
+    keep = run_top_p_indices(probs, 0.89)
+    numpy.testing.assert_equal(
+        keep.detach().numpy(),
+        [False, True, True]
+    )
+    # 2-d case: [batch, probs]
+    probs = torch.tensor([[0.1, 0.2, 0.7], [0.7, 0.1, 0.2]])
+    keep = run_top_p_indices(probs, 0.5)
+    numpy.testing.assert_equal(
+        keep.detach().numpy(),
+        [[False, False, True], [True, False, False]]
+    )
+    keep = run_top_p_indices(probs, 0.89)
+    numpy.testing.assert_equal(
+        keep.detach().numpy(),
+        [[False, True, True], [True, False, True]]
+    )
+    # 3-d case: [batch, seq_len, probs]
+    probs = torch.tensor([
+        [[0.1, 0.2, 0.7], [0.7, 0.1, 0.2]],
+        [[0.2, 0.4, 0.4], [0.2, 0.0, 0.8]]
+    ])
+    keep = run_top_p_indices(probs, 0.5)
+    numpy.testing.assert_equal(
+        keep.detach().numpy(),
+        [
+            [[False, False, True], [True, False, False]],
+            [[False, True, True], [False, False, True]],
+        ]
+    )
+    keep = run_top_p_indices(probs, 0.89)
+    numpy.testing.assert_equal(
+        keep.detach().numpy(),
+        [
+            [[False, True, True], [True, False, True]],
+            [[True, True, True], [True, False, True]],
+        ]
+    )
 
 
 def test_softmax_matches_pytorch():

@@ -32,14 +32,15 @@ def parse_params():
     # Model Params
     parser.add_argument("--seed", type=int, default=42, help="Random seed.")
     parser.add_argument("--vocab_size", type=int, default=10_000, help="Vocabulary size.")
-    parser.add_argument("--context_length", type=int, default=8, help="Context length.")
-    parser.add_argument("--num_layers", type=int, default=2, help="Number of layers.")
-    parser.add_argument("--d_model", type=int, default=64, help="Attention dimension.")
-    parser.add_argument("--num_heads", type=int, default=8, help="Number of attention heads.")
-    parser.add_argument("--d_ff", type=int, default=192, help="Feedforward hidden dimension.")
+    parser.add_argument("--context_length", type=int, default=256, help="Context length.")
+    parser.add_argument("--num_layers", type=int, default=4, help="Number of layers.")
+    parser.add_argument("--d_model", type=int, default=512, help="Attention dimension.")
+    parser.add_argument("--num_heads", type=int, default=16, help="Number of attention heads.")
+    parser.add_argument("--d_ff", type=int, default=1344, help="Feedforward hidden dimension.")
     parser.add_argument("--theta", type=float, default=10_000.0, help="Theta value for RoPE.")
 
     # Training Options
+    parser.add_argument("--compile", type=bool, default=False, help="Whether the model should be compiled before training.")
     parser.add_argument("--batch_size", type=int, default=16, help="Batch size.")
     parser.add_argument("--lr", type=float, default=3e-3, help="Learning rate.")
     parser.add_argument("--weight_decay", type=float, default=0.1, help="Weight decay.")
@@ -82,13 +83,17 @@ def train(models_dir: str):
     train_data = io.read_tokens(cfg.train_path)
     val_data = io.read_tokens(cfg.val_path)
 
-    # TODO: Add wandb watch, especially to observe gradient norms.
+    # IMPORTANT:
+    # TODO: Add per-token perplexity loss in reporting.
+    # TODO: Fix loss logging to consistently log per-token loss.
     # TODO: Clip Gradients.
     # TODO: Adjust learning rate schedule, e.g. cosine_lr_schedule?
+    # TODO: Adjust HParams, e.g. betas are lower for LLMs.
+    # Nice to have:
+    # TODO: Change loss, e.g. to Z-loss for numerical stability.
     # TODO: Try adding post-Norm (inside residual).
     # TODO: Add QK LayerNorms in Attention - for softmax stability there.
-    # TODO: Change loss, e.g. to Z-loss for numerical stability.
-    # TODO: Adjust HParams, e.g. betas are lower for LLMs.
+    # TODO: Add wandb watch, especially to observe gradient norms.
     model = nn.transformer.TransformerLM(
         cfg.vocab_size,
         cfg.context_length,
@@ -98,6 +103,13 @@ def train(models_dir: str):
         cfg.d_ff,
         cfg.theta,
     ).to(cfg.device)
+    if cfg.compile:
+        if cfg.device == "cpu":
+            model = torch.compile(model)
+        elif cfg.device == "mps":
+            model = torch.compile(model, backend="aot_eager")
+        else:
+            model = torch.compile(model, mode="max-autotune")
     opt = nn.optimizer.AdamW(model.parameters(), cfg.lr, cfg.weight_decay)
 
     global_step, t0 = 0, time.perf_counter()
@@ -144,7 +156,6 @@ def train(models_dir: str):
                 opt_lr = opt.param_groups[0]["lr"]
                 sec_per_step = step_time_accum / cfg.log_freq
                 step_time_accum = 0.0
-                # TODO: Add Perplexity metric.
                 wandb.log({
                     "global_step": global_step,
                     "train/loss": loss.item(),
@@ -185,7 +196,6 @@ def train(models_dir: str):
                 val_loss += loss.item() * yb.size(0)
                 val_correct += (pred == yb).sum().item(); val_count += yb.numel()
         val_loss /= val_count
-        # TODO: Add Perplexity metric.
         wandb.log({
             "global_step": global_step,
             "val/acc_epoch": val_correct / val_count,
@@ -205,6 +215,7 @@ def main():
         project=params.project,
         name=params.run_name,
         group=params.group,
+        job_type='train',
         tags=list(params.tags),
         config=vars(params),
     )
@@ -216,14 +227,16 @@ def main():
     device = cfg.device
     if device == "cuda" and not torch.cuda.is_available():
         raise ValueError("Tried running on CUDA, but it's not available")
-    if device == "mps" and not torch.cuda.is_available():
+    if device == "mps" and not torch.backends.mps.is_available():
         raise ValueError("Tried running on Apple Silicon, but it's not available")
+    if device == "mps" and not torch.backends.mps.is_built():
+        raise ValueError("Tried running on Apple Silicon, but it's not built")
     # Would be better to use the generator APIs for both torch and np.
     torch.manual_seed(cfg.seed)
     np.random.seed(cfg.seed)
     random.seed(cfg.seed)
 
-    models_dir = f"{cfg.models_base_path}/{cfg.project}/{cfg.run_name}"
+    models_dir = f"{cfg.models_base_path}/{cfg.project}/{cfg.group}/{cfg.run_name}"
     os.makedirs(models_dir, exist_ok=True)
     train(models_dir)
 

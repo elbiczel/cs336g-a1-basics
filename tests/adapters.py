@@ -3,13 +3,13 @@ from __future__ import annotations
 import os
 from typing import IO, Any, BinaryIO
 from collections.abc import Iterable
-from jaxtyping import Float, Int
+from jaxtyping import Float, Int, Bool
 
 import numpy.typing as npt
 import torch
 from torch import Tensor
 
-from cs336_basics import data
+from cs336_basics import data, generator
 from cs336_tokenizer import bpe
 import cs336_nn as nn
 
@@ -490,6 +490,8 @@ def run_softmax(in_features: Float[Tensor, " ..."], dim: int) -> Float[Tensor, "
     """
     return nn.softmax(in_features, dim)
 
+def run_top_p_indices(probs: Float[Tensor, " ..."], p: float) -> Bool[Tensor, " ..."]:
+    return generator.top_p_indices(probs, p, dim=-1)
 
 def run_cross_entropy(
     inputs: Float[Tensor, " batch_size vocab_size"], targets: Int[Tensor, " batch_size"]
