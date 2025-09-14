@@ -73,11 +73,16 @@ def cosine_lr_schedule(t: int, lr_max: float, lr_min: float, warmup_t: int, t_c:
     lr = 0.5 * (1 + np.cos((t - warmup_t) / (t_c - warmup_t) * np.pi)) * (lr_max - lr_min)
     return lr_min + lr
 
-def clip_grad(params: Iterable[torch.nn.Parameter], max_l2_norm: float, eps: float = 10e-6):
+@torch.no_grad()
+def clip_grad(params: Iterable[torch.nn.Parameter], max_l2_norm: float, eps: float = 1e-6):
     grads = [p.grad for p in params if p.grad is not None]
     if not grads:
         return
-    total_norm = torch.linalg.norm(torch.stack([torch.linalg.norm(g.detach(), ord=2) for g in grads]), ord=2)
+    # vector (elementwise) L2 norms per tensor — no SVD on MPS
+    per_tensor = [torch.linalg.vector_norm(g) for g in grads]
+    total_norm = torch.linalg.vector_norm(torch.stack(per_tensor))
+    if not torch.isfinite(total_norm) or total_norm <= 0.0:
+        return
     clip_coef = max_l2_norm / (total_norm + eps)
     if clip_coef < 1.0:
         for g in grads:

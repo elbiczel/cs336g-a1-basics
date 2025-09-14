@@ -53,7 +53,7 @@ def parse_params():
 
     # Logging Options
     parser.add_argument(
-        "--log_freq", type=int, default=10, help="Log fast train/val metrics from a single batch."
+        "--log_freq", type=int, default=20, help="Log fast train/val metrics from a single batch."
     )
     parser.add_argument(
         "--val_steps", type=int, default=5, help="Number of batches to evaluate validation loss on."
@@ -112,6 +112,7 @@ def train(models_dir: str):
     # TODO: Try adding post-Norm (inside residual).
     # TODO: Add QK LayerNorms in Attention - for softmax stability there.
     # TODO: Exclude LayerNorms and Embeddings from Weight Decay in AdamW.
+    # TODO: Try weight tying: embeddings == lm_head.
     model = nn.transformer.TransformerLM(
         cfg.vocab_size,
         cfg.context_length,
@@ -128,6 +129,12 @@ def train(models_dir: str):
             model = torch.compile(model, backend="aot_eager")
         else:
             model = torch.compile(model, mode="max-autotune")
+    # optimizer_grouped_parameters = [
+    # {"params": [param_dict[n] for n in sorted(list(decay))],
+    #  "weight_decay": 0.1},             # or your chosen WD
+    # {"params": [param_dict[n] for n in sorted(list(no_decay))],
+    #  "weight_decay": 0.0},             # <-- excluded from WD only
+    # ]
     opt = nn.optimizer.AdamW(model.parameters(), cfg.lr, cfg.weight_decay)
     wandb.watch(model, log="all", log_freq=cfg.log_freq)
 
@@ -142,12 +149,11 @@ def train(models_dir: str):
         loss = nn.loss.cross_entropy(logits, yb)
 
         opt.zero_grad(set_to_none=True)
+        loss.backward()
         if cfg.max_grad_l2_norm > 0.0:
             nn.optimizer.clip_grad(model.parameters(), cfg.max_grad_l2_norm)
-        # Update the learning rate.
         for grp in opt.param_groups:
             grp["lr"] = max(nn.optimizer.cosine_lr_schedule(global_step, cfg.lr, cfg.final_lr, cfg.warmup_t, cfg.t_c), 1e-8)
-        loss.backward()
         opt.step()
 
         # stats
@@ -163,8 +169,27 @@ def train(models_dir: str):
 
         if global_step % cfg.log_freq == 0:
             val_metrics = get_validation_metrics(model, val_data)
-            grad_norm = torch.norm(torch.stack([p.grad.detach().data.norm(2)
-                                                for p in model.parameters() if p.grad is not None]), 2).item()
+            per_param_norms = {
+                name: torch.linalg.vector_norm(p.grad.detach())
+                for name, p in model.named_parameters()
+                if p.grad is not None
+            }
+            per_param_stats = {
+                f"grad_norm_{name}": torch.linalg.vector_norm(p.grad.detach())
+                for name, p in model.named_parameters()
+                if p.grad is not None
+            }
+            total_grad_norm = torch.linalg.vector_norm(torch.stack(list(per_param_norms.values())))
+            per_param_stats.update({
+                f"grad_rms_{name}": p.grad.detach().pow(2).mean().sqrt()
+                for name, p in model.named_parameters()
+                if p.grad is not None
+            })
+            per_param_stats.update({
+                f"numel_{name}": torch.tensor(p.numel())
+                for name, p in model.named_parameters()
+                if p.grad is not None
+            })
             opt_lr = opt.param_groups[0]["lr"]
             sec_per_step = step_time_accum / cfg.log_freq
             step_time_accum = 0.0
@@ -175,9 +200,9 @@ def train(models_dir: str):
                 "train/perplexity": math.exp(loss.item()),
                 "time/sec_per_step": sec_per_step,
                 "time/minutes": (time.perf_counter() - t0) / 60.0,
-                "opt/grad_norm": grad_norm,
                 "opt/lr": opt_lr,
-            } | val_metrics)
+                "opt/grad_norm_total": total_grad_norm.item(),
+            } | {f"opt/{k}": v.item()  for k, v in per_param_stats.items()}| val_metrics)
         if global_step > 0 and cfg.checkpoint_step_freq > 0 and global_step % cfg.checkpoint_step_freq == 0:
             chkpt_path = f"{models_dir}/step_{global_step}.pt"
             data.save_checkpoint(model, opt, global_step, chkpt_path)
@@ -186,8 +211,8 @@ def train(models_dir: str):
     val_metrics = get_validation_metrics(model, val_data)
     wandb.log({
         "global_step": global_step,
-        "train/final_loss": total_loss / total_count,
-        "train/final_acc": total_correct / total_count,
+        "train/loss": total_loss / total_count,
+        "train/acc": total_correct / total_count,
         "time/minutes": (time.perf_counter() - t0) / 60.0
     } | val_metrics)
 
