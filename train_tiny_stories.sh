@@ -3,11 +3,12 @@ uv run cs336_basics/trainer.py \
   --train_path='data/TinyStoriesV2-GPT4-train-trie-tokenized.dat' \
   --val_path='data/TinyStoriesV2-GPT4-valid-trie-tokenized.dat' \
   --models_base_path='data/models' \
-  --run_name='debug_01' \
   --device='mps' \
-  --group='mps_debug' \
+  --group='init_runs' \
+  --run_name='debug_1_01' \
+  --lr=1e-4 \
+  --final_lr=1e-5 \
+  --warmup_t=250 \
   --batch_size=32 \
-  --max_steps_per_epoch=250 \
-  --max_epochs=20 \
-  --compile=True \
+  --max_grad_l2_norm=2.0 \
   $@

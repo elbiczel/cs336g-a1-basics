@@ -1,8 +1,9 @@
 import argparse
+import math
 import os
 import random
 import time
-from typing import Iterator, Tuple
+from typing import Iterator, Tuple, Optional
 
 import numpy as np
 import numpy.typing as npt
@@ -40,34 +41,37 @@ def parse_params():
     parser.add_argument("--theta", type=float, default=10_000.0, help="Theta value for RoPE.")
 
     # Training Options
-    parser.add_argument("--compile", type=bool, default=False, help="Whether the model should be compiled before training.")
-    parser.add_argument("--batch_size", type=int, default=16, help="Batch size.")
-    parser.add_argument("--lr", type=float, default=3e-3, help="Learning rate.")
+    parser.add_argument("--max_steps", type=int, default=5000, help="Max steps to do over the dataset during training.")
+    parser.add_argument("--compile", type=bool, default=True, help="Whether the model should be compiled before training.")
+    parser.add_argument("--batch_size", type=int, default=32, help="Batch size.")
+    parser.add_argument("--lr", type=float, default=1e-4, help="Peak learning rate.")
+    parser.add_argument("--final_lr", type=float, default=1e-5, help="Final learning rate.")
+    parser.add_argument("--warmup_t", type=int, default=100, help="Number of warm-up steps for the optimizer.")
+    parser.add_argument("--t_c", type=int, default=5000, help="Cosine cycle duration. After it's reached uses final_lr.")
     parser.add_argument("--weight_decay", type=float, default=0.1, help="Weight decay.")
+    parser.add_argument("--max_grad_l2_norm", type=float, default=2.0, help="max l2 norm applied for gradient clipping. If <= 0.0 no clipping is applied.")
 
     # Logging Options
-    parser.add_argument("--max_epochs", type=int, default=5, help="Maximum epochs.")
     parser.add_argument(
-        "--max_steps_per_epoch", type=int, default=0, help="Max steps per epoch (default: 0 means use all steps)."
+        "--log_freq", type=int, default=10, help="Log fast train/val metrics from a single batch."
     )
     parser.add_argument(
-        "--log_freq", type=int, default=50, help="Log fast train/val metrics from a single batch."
+        "--val_steps", type=int, default=5, help="Number of batches to evaluate validation loss on."
     )
-    parser.add_argument("--checkpoint_step_freq", type=int, default=0, help="Checkpoint model every N steps. If 0 only checkpoint_epoch_freq is used.")
-    parser.add_argument("--checkpoint_epoch_freq", type=int, default=1, help="Checkpoint model every N steps.")
+    parser.add_argument("--checkpoint_step_freq", type=int, default=100, help="Checkpoint model every N steps. If 0 only saves the final checkpoint.")
 
     return parser.parse_args()
 
 
-def epoch_iterator(
+def dataset_iterator(
         d: npt.NDArray[np.uint16],
         shuffle: bool = True,
+        max_steps: Optional[int] = None,
 ) -> Iterator[Tuple[torch.Tensor, torch.Tensor]]:
-    # Statistically we should iterate over the whole dataset, but we sample with returns.
     cfg = wandb.config
     num_iterations = len(d) // cfg.batch_size
-    if cfg.max_steps_per_epoch:
-        num_iterations = min(num_iterations, cfg.max_steps_per_epoch)
+    if max_steps:
+        num_iterations = min(num_iterations, max_steps)
 
     i = 0
     start = 0 if not shuffle else None
@@ -77,6 +81,24 @@ def epoch_iterator(
             start += cfg.batch_size
         i += 1
 
+@torch.no_grad()
+def get_validation_metrics(model, val_data) -> dict:
+    cfg = wandb.config
+    model.eval()
+    val_correct = val_count = 0; val_loss = 0.0
+    for xb, yb in dataset_iterator(val_data, shuffle=True, max_steps=cfg.val_steps):
+        logits = model(xb)
+        loss = nn.loss.cross_entropy(logits, yb)
+        val_loss += loss.item() * yb.numel()
+        pred = logits.argmax(dim=-1)
+        val_correct += (pred == yb).sum().item()
+        val_count += yb.numel()
+    model.train()
+    return {
+        "val/loss": val_loss / val_count,
+        "val/acc": val_correct / val_count,
+        "val/perplexity": math.exp(val_loss / val_count)
+    }
 
 def train(models_dir: str):
     cfg = wandb.config
@@ -84,16 +106,12 @@ def train(models_dir: str):
     val_data = io.read_tokens(cfg.val_path)
 
     # IMPORTANT:
-    # TODO: Add per-token perplexity loss in reporting.
-    # TODO: Fix loss logging to consistently log per-token loss.
-    # TODO: Clip Gradients.
-    # TODO: Adjust learning rate schedule, e.g. cosine_lr_schedule?
-    # TODO: Adjust HParams, e.g. betas are lower for LLMs.
+    # TODO: Adjust HParams: lr, final_lr, warmup_t, beta_1, beta_2, adam_eps, weight_decay
     # Nice to have:
     # TODO: Change loss, e.g. to Z-loss for numerical stability.
     # TODO: Try adding post-Norm (inside residual).
     # TODO: Add QK LayerNorms in Attention - for softmax stability there.
-    # TODO: Add wandb watch, especially to observe gradient norms.
+    # TODO: Exclude LayerNorms and Embeddings from Weight Decay in AdamW.
     model = nn.transformer.TransformerLM(
         cfg.vocab_size,
         cfg.context_length,
@@ -111,96 +129,67 @@ def train(models_dir: str):
         else:
             model = torch.compile(model, mode="max-autotune")
     opt = nn.optimizer.AdamW(model.parameters(), cfg.lr, cfg.weight_decay)
+    wandb.watch(model, log="all", log_freq=cfg.log_freq)
 
     global_step, t0 = 0, time.perf_counter()
-    for epoch in range(1, cfg.max_epochs + 1):
-        model.train()
-        epoch_loss = 0.0
-        epoch_correct = 0; epoch_count = 0
-        step_time_accum = 0.0
+    model.train()
+    total_loss = 0.0; total_correct = 0; total_count = 0
+    step_time_accum = 0.0
+    step_t0 = time.perf_counter()
+    
+    for xb, yb in dataset_iterator(train_data, shuffle=True, max_steps=cfg.max_steps):
+        logits = model(xb)
+        loss = nn.loss.cross_entropy(logits, yb)
 
-        step_t0 = time.perf_counter()
+        opt.zero_grad(set_to_none=True)
+        if cfg.max_grad_l2_norm > 0.0:
+            nn.optimizer.clip_grad(model.parameters(), cfg.max_grad_l2_norm)
+        # Update the learning rate.
+        for grp in opt.param_groups:
+            grp["lr"] = max(nn.optimizer.cosine_lr_schedule(global_step, cfg.lr, cfg.final_lr, cfg.warmup_t, cfg.t_c), 1e-8)
+        loss.backward()
+        opt.step()
 
-        for xb, yb in epoch_iterator(train_data, shuffle=True):
-            logits = model(xb)
-            loss = nn.loss.cross_entropy(logits, yb)
-
-            opt.zero_grad(set_to_none=True); loss.backward(); opt.step()
-
-            global_step += 1
-
-            # stats
-            with torch.no_grad():
-                pred = logits.argmax(dim=-1)
-                correct = (pred == yb).sum().item()
-            batch_size = yb.numel()
-            epoch_loss += loss.item() * batch_size
-            epoch_correct += correct
-            epoch_count += batch_size
-
-            now = time.perf_counter()
-            step_time = now - step_t0
-            step_time_accum += step_time
-            step_t0 = now
-
-            if global_step % cfg.log_freq == 0:
-                with torch.no_grad():
-                    xb, yb = data.get_batch(val_data, cfg.batch_size, cfg.context_length, cfg.device)
-                    logits = model(xb)
-                    val_loss = nn.loss.cross_entropy(logits, yb).item()
-                    val_pred = logits.argmax(dim=-1)
-                    val_correct = (val_pred == yb).sum().item()
-                    val_size = yb.numel()
-                    total_norm = torch.norm(torch.stack([p.grad.detach().data.norm(2) 
-                                        for p in model.parameters() if p.grad is not None]), 2).item()
-                opt_lr = opt.param_groups[0]["lr"]
-                sec_per_step = step_time_accum / cfg.log_freq
-                step_time_accum = 0.0
-                wandb.log({
-                    "global_step": global_step,
-                    "train/loss": loss.item(),
-                    "train/acc_batch": correct / batch_size,
-                    "val/loss": val_loss,
-                    "val/acc_batch": val_correct / val_size,
-                    "time/sec_per_step": sec_per_step,
-                    "time/minutes": (time.perf_counter() - t0) / 60.0,
-                    "opt/grad_norm": total_norm,
-                    "opt/lr": opt_lr,
-                })
-            if cfg.checkpoint_step_freq > 0 and global_step % cfg.checkpoint_step_freq == 0:
-                chkpt_path = f"{models_dir}/step_{global_step}.pt"
-                data.save_checkpoint(model, opt, global_step, chkpt_path)
-        # end of epoch: aggregate train metrics
-        train_loss = epoch_loss / epoch_count
-        train_acc = epoch_correct / epoch_count
-        wandb.log({
-            "global_step": global_step,
-            "epoch": epoch,
-            "train/loss_epoch": train_loss,
-            "train/acc_epoch": train_acc,
-            "time/epoch_minutes": (time.perf_counter() - t0) / 60.0
-        })
-        if epoch % cfg.checkpoint_epoch_freq == 0:
-            chkpt_path = f"{models_dir}/epoch_{epoch}.pt"
-            data.save_checkpoint(model, opt, global_step, chkpt_path)
-
-        # Validation
-        model.eval()
-        val_correct = val_count = 0
-        val_loss = 0.0
+        # stats
+        now = time.perf_counter()
+        step_time = now - step_t0
+        step_time_accum += step_time
+        step_t0 = now
         with torch.no_grad():
-            # If max_steps_per_epoch is set, we will shuffle the data from the val dataset.
-            for xb, yb in epoch_iterator(val_data, shuffle=cfg.max_steps_per_epoch == 0):
-                pred = model(xb).argmax(-1)
-                loss = nn.loss.cross_entropy(logits, yb)
-                val_loss += loss.item() * yb.size(0)
-                val_correct += (pred == yb).sum().item(); val_count += yb.numel()
-        val_loss /= val_count
-        wandb.log({
-            "global_step": global_step,
-            "val/acc_epoch": val_correct / val_count,
-            "val/loss_epoch": val_loss
-        })
+            pred = logits.argmax(dim=-1)
+            correct = (pred == yb).sum().item()
+        batch_size = yb.numel()
+        total_loss += loss.item() * batch_size; total_correct += correct; total_count += batch_size
+
+        if global_step % cfg.log_freq == 0:
+            val_metrics = get_validation_metrics(model, val_data)
+            grad_norm = torch.norm(torch.stack([p.grad.detach().data.norm(2)
+                                                for p in model.parameters() if p.grad is not None]), 2).item()
+            opt_lr = opt.param_groups[0]["lr"]
+            sec_per_step = step_time_accum / cfg.log_freq
+            step_time_accum = 0.0
+            wandb.log({
+                "global_step": global_step,
+                "train/loss": loss.item(),
+                "train/acc": correct / batch_size,
+                "train/perplexity": math.exp(loss.item()),
+                "time/sec_per_step": sec_per_step,
+                "time/minutes": (time.perf_counter() - t0) / 60.0,
+                "opt/grad_norm": grad_norm,
+                "opt/lr": opt_lr,
+            } | val_metrics)
+        if global_step > 0 and cfg.checkpoint_step_freq > 0 and global_step % cfg.checkpoint_step_freq == 0:
+            chkpt_path = f"{models_dir}/step_{global_step}.pt"
+            data.save_checkpoint(model, opt, global_step, chkpt_path)
+        global_step += 1
+    
+    val_metrics = get_validation_metrics(model, val_data)
+    wandb.log({
+        "global_step": global_step,
+        "train/final_loss": total_loss / total_count,
+        "train/final_acc": total_correct / total_count,
+        "time/minutes": (time.perf_counter() - t0) / 60.0
+    } | val_metrics)
 
     # TODO: Track and save the best checkpoint.
     chkpt_path = f"{models_dir}/final.pt"
@@ -222,6 +211,7 @@ def main():
     wandb.define_metric("global_step")
     wandb.define_metric("train/*", step_metric="global_step")
     wandb.define_metric("val/*", step_metric="global_step")
+    wandb.define_metric("opt/*", step_metric="global_step")
     wandb.define_metric("time/*", step_metric="global_step")
     cfg = wandb.config
     device = cfg.device
