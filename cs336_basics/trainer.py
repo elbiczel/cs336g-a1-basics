@@ -111,7 +111,6 @@ def train(models_dir: str):
     # TODO: Change loss, e.g. to Z-loss for numerical stability.
     # TODO: Try adding post-Norm (inside residual).
     # TODO: Add QK LayerNorms in Attention - for softmax stability there.
-    # TODO: Exclude LayerNorms and Embeddings from Weight Decay in AdamW.
     # TODO: Try weight tying: embeddings == lm_head.
     model = nn.transformer.TransformerLM(
         cfg.vocab_size,
@@ -129,18 +128,32 @@ def train(models_dir: str):
             model = torch.compile(model, backend="aot_eager")
         else:
             model = torch.compile(model, mode="max-autotune")
-    # optimizer_grouped_parameters = [
-    # {"params": [param_dict[n] for n in sorted(list(decay))],
-    #  "weight_decay": 0.1},             # or your chosen WD
-    # {"params": [param_dict[n] for n in sorted(list(no_decay))],
-    #  "weight_decay": 0.0},             # <-- excluded from WD only
-    # ]
-    opt = nn.optimizer.AdamW(model.parameters(), cfg.lr, cfg.weight_decay)
+    param_dict = {}
+    decay_params = set()
+    no_decay_params = set()
+    for module_name, module in model.named_modules():
+        for param_name, param in module.named_parameters(recurse=False):
+            full_name = f"{module_name}.{param_name}" if module_name else param_name
+            assert full_name not in param_dict
+            param_dict[full_name] = param
+            if isinstance(module, (nn.layer_norm.RMSNorm, nn.embedding.Embedding)):
+                no_decay_params.add(full_name)
+            else:
+                decay_params.add(full_name)
+    optimizer_grouped_parameters = [
+        # Default group.
+        {"params": [param_dict[n] for n in sorted(decay_params)]},
+        # Params without weight decay
+        {
+            "params": [param_dict[n] for n in sorted(no_decay_params)],
+            "weight_decay": 0.0
+        },
+    ]
+    opt = nn.optimizer.AdamW(optimizer_grouped_parameters, cfg.lr, cfg.weight_decay)
     wandb.watch(model, log="all", log_freq=cfg.log_freq)
 
     global_step, t0 = 0, time.perf_counter()
     model.train()
-    total_loss = 0.0; total_correct = 0; total_count = 0
     step_time_accum = 0.0
     step_t0 = time.perf_counter()
     
@@ -164,29 +177,22 @@ def train(models_dir: str):
         with torch.no_grad():
             pred = logits.argmax(dim=-1)
             correct = (pred == yb).sum().item()
-        batch_size = yb.numel()
-        total_loss += loss.item() * batch_size; total_correct += correct; total_count += batch_size
 
-        if global_step % cfg.log_freq == 0:
+        if (global_step > 0 and global_step % cfg.log_freq == 0) or global_step == cfg.max_steps-1:
             val_metrics = get_validation_metrics(model, val_data)
-            per_param_norms = {
-                name: torch.linalg.vector_norm(p.grad.detach())
-                for name, p in model.named_parameters()
-                if p.grad is not None
-            }
             per_param_stats = {
-                f"grad_norm_{name}": torch.linalg.vector_norm(p.grad.detach())
+                f"grad_norm/{name}": torch.linalg.vector_norm(p.grad.detach())
                 for name, p in model.named_parameters()
                 if p.grad is not None
             }
-            total_grad_norm = torch.linalg.vector_norm(torch.stack(list(per_param_norms.values())))
+            total_grad_norm = torch.linalg.vector_norm(torch.stack(list(per_param_stats.values())))
             per_param_stats.update({
-                f"grad_rms_{name}": p.grad.detach().pow(2).mean().sqrt()
+                f"grad_rms/{name}": p.grad.detach().pow(2).mean().sqrt()
                 for name, p in model.named_parameters()
                 if p.grad is not None
             })
             per_param_stats.update({
-                f"numel_{name}": torch.tensor(p.numel())
+                f"param_numel/{name}": p.numel()
                 for name, p in model.named_parameters()
                 if p.grad is not None
             })
@@ -196,25 +202,17 @@ def train(models_dir: str):
             wandb.log({
                 "global_step": global_step,
                 "train/loss": loss.item(),
-                "train/acc": correct / batch_size,
+                "train/acc": correct / yb.numel(),
                 "train/perplexity": math.exp(loss.item()),
                 "time/sec_per_step": sec_per_step,
                 "time/minutes": (time.perf_counter() - t0) / 60.0,
                 "opt/lr": opt_lr,
                 "opt/grad_norm_total": total_grad_norm.item(),
-            } | {f"opt/{k}": v.item()  for k, v in per_param_stats.items()}| val_metrics)
+            } | {k: v.item()  for k, v in per_param_stats.items()}| val_metrics)
         if global_step > 0 and cfg.checkpoint_step_freq > 0 and global_step % cfg.checkpoint_step_freq == 0:
             chkpt_path = f"{models_dir}/step_{global_step}.pt"
             data.save_checkpoint(model, opt, global_step, chkpt_path)
         global_step += 1
-    
-    val_metrics = get_validation_metrics(model, val_data)
-    wandb.log({
-        "global_step": global_step,
-        "train/loss": total_loss / total_count,
-        "train/acc": total_correct / total_count,
-        "time/minutes": (time.perf_counter() - t0) / 60.0
-    } | val_metrics)
 
     # TODO: Track and save the best checkpoint.
     chkpt_path = f"{models_dir}/final.pt"
@@ -237,6 +235,9 @@ def main():
     wandb.define_metric("train/*", step_metric="global_step")
     wandb.define_metric("val/*", step_metric="global_step")
     wandb.define_metric("opt/*", step_metric="global_step")
+    wandb.define_metric("grad_norm/*", step_metric="global_step")
+    wandb.define_metric("grad_rms/*", step_metric="global_step")
+    wandb.define_metric("param_numel/*", step_metric="global_step")
     wandb.define_metric("time/*", step_metric="global_step")
     cfg = wandb.config
     device = cfg.device
