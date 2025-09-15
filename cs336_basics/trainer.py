@@ -50,6 +50,7 @@ def parse_params():
     parser.add_argument("--t_c", type=int, default=5000, help="Cosine cycle duration. After it's reached uses final_lr.")
     parser.add_argument("--weight_decay", type=float, default=0.1, help="Weight decay.")
     parser.add_argument("--max_grad_l2_norm", type=float, default=2.0, help="max l2 norm applied for gradient clipping. If <= 0.0 no clipping is applied.")
+    parser.add_argument("--z_loss_weight", type=float, default=1e-4, help="Weight for the Z-loss.")
 
     # Logging Options
     parser.add_argument(
@@ -108,7 +109,6 @@ def train(models_dir: str):
     # IMPORTANT:
     # TODO: Adjust HParams: lr, final_lr, warmup_t, beta_1, beta_2, adam_eps, weight_decay
     # Nice to have:
-    # TODO: Change loss, e.g. to Z-loss for numerical stability.
     # TODO: Try adding post-Norm (inside residual).
     # TODO: Add QK LayerNorms in Attention - for softmax stability there.
     # TODO: Try weight tying: embeddings == lm_head.
@@ -159,7 +159,12 @@ def train(models_dir: str):
     
     for xb, yb in dataset_iterator(train_data, shuffle=True, max_steps=cfg.max_steps):
         logits = model(xb)
-        loss = nn.loss.cross_entropy(logits, yb)
+        ce_loss = nn.loss.cross_entropy(logits, yb)        
+        logZ = torch.logsumexp(logits, dim=-1)
+        z_loss = (logZ ** 2).mean()
+        loss = ce_loss
+        if cfg.z_loss_weight > 0.0:
+            loss += (z_loss * cfg.z_loss_weight)
 
         opt.zero_grad(set_to_none=True)
         loss.backward()
@@ -192,7 +197,7 @@ def train(models_dir: str):
                 if p.grad is not None
             })
             per_param_stats.update({
-                f"param_numel/{name}": p.numel()
+                f"param_numel/{name}": torch.tensor(p.numel())
                 for name, p in model.named_parameters()
                 if p.grad is not None
             })
@@ -202,6 +207,8 @@ def train(models_dir: str):
             wandb.log({
                 "global_step": global_step,
                 "train/loss": loss.item(),
+                "train/ce_loss": ce_loss.item(),
+                "train/z_loss": z_loss.item(),
                 "train/acc": correct / yb.numel(),
                 "train/perplexity": math.exp(loss.item()),
                 "time/sec_per_step": sec_per_step,
