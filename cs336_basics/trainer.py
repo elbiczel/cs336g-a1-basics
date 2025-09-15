@@ -49,17 +49,22 @@ def parse_params():
     parser.add_argument("--warmup_t", type=int, default=100, help="Number of warm-up steps for the optimizer.")
     parser.add_argument("--t_c", type=int, default=5000, help="Cosine cycle duration. After it's reached uses final_lr.")
     parser.add_argument("--weight_decay", type=float, default=0.1, help="Weight decay.")
-    parser.add_argument("--max_grad_l2_norm", type=float, default=2.0, help="max l2 norm applied for gradient clipping. If <= 0.0 no clipping is applied.")
-    parser.add_argument("--z_loss_weight", type=float, default=1e-4, help="Weight for the Z-loss.")
+    parser.add_argument("--max_grad_l2_norm", type=float, default=3.0, help="max l2 norm applied for gradient clipping. If <= 0.0 no clipping is applied.")
+    parser.add_argument("--z_loss_weight", type=float, default=0.0, help="Weight for the Z-loss.")
+    parser.add_argument("--adam_beta_1", type=float, default=0.9, help="Beta 1 for AdamW optimizer.")
+    parser.add_argument("--adam_beta_2", type=float, default=0.95, help="Beta 2 for AdamW optimizer.")
+    parser.add_argument("--adam_eps", type=float, default=1e-8, help="Eps parameter for AdamW optimizer.")
 
     # Logging Options
     parser.add_argument(
-        "--log_freq", type=int, default=20, help="Log fast train/val metrics from a single batch."
+        "--log_freq", type=int, default=10, help="Log fast train/val metrics from a single batch."
     )
     parser.add_argument(
-        "--val_steps", type=int, default=5, help="Number of batches to evaluate validation loss on."
+        "--detail_log_freq", type=int, default=100, help="Log fast train/val metrics from a single batch."
     )
-    parser.add_argument("--checkpoint_step_freq", type=int, default=100, help="Checkpoint model every N steps. If 0 only saves the final checkpoint.")
+    parser.add_argument(
+        "--val_steps", type=int, default=25, help="Number of batches to evaluate validation loss on."
+    )
 
     return parser.parse_args()
 
@@ -82,6 +87,7 @@ def dataset_iterator(
             start += cfg.batch_size
         i += 1
 
+
 @torch.no_grad()
 def get_validation_metrics(model, val_data) -> dict:
     cfg = wandb.config
@@ -101,17 +107,17 @@ def get_validation_metrics(model, val_data) -> dict:
         "val/perplexity": math.exp(val_loss / val_count)
     }
 
+
 def make_name_map(model: torch.nn.Module):
     # Use id(param) as the key (tensors are unhashable); you can also attach p._name = name if you like
     return {id(p): name for name, p in model.named_parameters()}
+
 
 def train(models_dir: str):
     cfg = wandb.config
     train_data = io.read_tokens(cfg.train_path)
     val_data = io.read_tokens(cfg.val_path)
 
-    # IMPORTANT:
-    # TODO: Adjust HParams: lr, final_lr, warmup_t, beta_1, beta_2, adam_eps, weight_decay
     # Nice to have:
     # TODO: Try adding post-Norm (inside residual).
     # TODO: Add QK LayerNorms in Attention - for softmax stability there.
@@ -153,14 +159,22 @@ def train(models_dir: str):
             "weight_decay": 0.0
         },
     ]
-    opt = nn.optimizer.AdamW(optimizer_grouped_parameters, cfg.lr, cfg.weight_decay, param_names=make_name_map(model))
-    wandb.watch(model, log="all", log_freq=cfg.log_freq)
+    param_names = make_name_map(model)
+    opt = nn.optimizer.AdamW(
+        optimizer_grouped_parameters,
+        lr=cfg.lr,
+        weight_decay=cfg.weight_decay,
+        betas=(cfg.adam_beta_1, cfg.adam_beta_2),
+        eps=cfg.adam_eps,
+        param_names=param_names)
+    wandb.watch(model, log="all", log_freq=cfg.detail_log_freq)
 
     global_step, t0 = 0, time.perf_counter()
     model.train()
     step_time_accum = 0.0
     step_t0 = time.perf_counter()
     
+    best_step = 0; best_val_loss = torch.inf
     for xb, yb in dataset_iterator(train_data, shuffle=True, max_steps=cfg.max_steps):
         logits = model(xb)
         ce_loss = nn.loss.cross_entropy(logits, yb)        
@@ -172,29 +186,30 @@ def train(models_dir: str):
 
         opt.zero_grad(set_to_none=True)
         loss.backward()
-        should_log = (global_step > 0 and global_step % cfg.log_freq == 0) or global_step == cfg.max_steps-1
-        if should_log:
-            per_param_stats = {
-                f"grad_norm/{name}": torch.linalg.vector_norm(p.grad.detach())
-                for name, p in model.named_parameters()
-                if p.grad is not None
-            }
-            total_grad_norm = torch.linalg.vector_norm(torch.stack(list(per_param_stats.values())))
-            per_param_stats.update({
+        should_log_details = (global_step > 0 and global_step % cfg.detail_log_freq == 0) or global_step == cfg.max_steps-1
+        per_param_stats = {}
+        if should_log_details:
+            per_param_stats = per_param_stats | {
                 f"grad_rms/{name}": p.grad.detach().pow(2).mean().sqrt()
                 for name, p in model.named_parameters()
                 if p.grad is not None
-            })
-            per_param_stats.update({
+            }
+            per_param_stats = per_param_stats | {
                 f"param_numel/{name}": torch.tensor(p.numel())
                 for name, p in model.named_parameters()
                 if p.grad is not None
-            })
+            }
         if cfg.max_grad_l2_norm > 0.0:
-            nn.optimizer.clip_grad(model.parameters(), cfg.max_grad_l2_norm)
+            param_grad_norms, total_grad_norm, clip_coef = nn.optimizer.clip_grad(model.parameters(), cfg.max_grad_l2_norm)
+            per_param_stats = per_param_stats | {
+                f"grad_norm/{param_names.get(p_id, "<unknown>")}": param_grad_norm
+                for p_id, param_grad_norm in param_grad_norms.items()
+            }
         for grp in opt.param_groups:
             grp["lr"] = max(nn.optimizer.cosine_lr_schedule(global_step, cfg.lr, cfg.final_lr, cfg.warmup_t, cfg.t_c), 1e-8)
-        _, maybe_opt_log_dict = opt.step(return_log=should_log)
+        _, maybe_opt_log_dict = opt.step(return_log=should_log_details)
+        if maybe_opt_log_dict is not None:
+            per_param_stats = per_param_stats | maybe_opt_log_dict
 
         # stats
         now = time.perf_counter()
@@ -205,13 +220,15 @@ def train(models_dir: str):
             pred = logits.argmax(dim=-1)
             correct = (pred == yb).sum().item()
 
-        if should_log:
-            val_metrics = get_validation_metrics(model, val_data)
+        if (global_step > 0 and global_step % cfg.log_freq == 0) or should_log_details:
+            val_metrics = get_validation_metrics(model, val_data) if should_log_details else {}
+            if val_metrics and val_metrics["val/loss"] < best_val_loss:
+                best_val_loss = val_metrics["val/loss"]
+                best_step = global_step
+                data.save_checkpoint(model, None, global_step, f"{models_dir}/best.pt")
             opt_lr = opt.param_groups[0]["lr"]
             sec_per_step = step_time_accum / cfg.log_freq
             step_time_accum = 0.0
-            assert maybe_opt_log_dict is not None
-            per_param_stats = per_param_stats | maybe_opt_log_dict
             wandb.log({
                 "global_step": global_step,
                 "train/loss": loss.item(),
@@ -223,16 +240,24 @@ def train(models_dir: str):
                 "time/minutes": (time.perf_counter() - t0) / 60.0,
                 "opt/lr": opt_lr,
                 "opt/grad_norm_total": total_grad_norm.item(),
+                "opt/clip_coef": clip_coef.item(),
             } | {k: v.item()  for k, v in per_param_stats.items()} | val_metrics)
-        if global_step > 0 and cfg.checkpoint_step_freq > 0 and global_step % cfg.checkpoint_step_freq == 0:
-            chkpt_path = f"{models_dir}/step_{global_step}.pt"
-            data.save_checkpoint(model, opt, global_step, chkpt_path)
+        if should_log_details:
+            
+            data.save_checkpoint(model, opt, global_step, f"{models_dir}/resume.pt")
         global_step += 1
 
-    # TODO: Track and save the best checkpoint.
-    chkpt_path = f"{models_dir}/final.pt"
-    data.save_checkpoint(model, opt, global_step, chkpt_path)
-    wandb.save(chkpt_path)
+    data.load_checkpoint(f"{models_dir}/best.pt", model, None)
+    final_metrics = {
+        f"final/{k}": v for k, v in get_validation_metrics(model, val_data).items()
+    } | {
+        "final/step": best_step,
+        "final/selected_val_loss": best_val_loss,
+    }
+    wandb.log(final_metrics)
+    for k, v in final_metrics.items():
+        wandb.run.summary[k] = v
+    wandb.save(f"{models_dir}/best.pt")
 
 
 def main():

@@ -5,11 +5,14 @@ uv run cs336_basics/trainer.py \
   --models_base_path='data/models' \
   --device='mps' \
   --group='init_runs' \
-  --run_name='debug_1_06' \
-  --lr=5e-3 \
-  --final_lr=5e-4 \
-  --warmup_t=200 \
+  --run_name='debug_1_08' \
+  --lr=5e-4 \
+  --final_lr=1e-6 \
+  --warmup_t=150 \
   --batch_size=32 \
   --max_grad_l2_norm=3.0 \
-  --z_loss_weight=5e-5 \
+  --z_loss_weight=0.0 \
+  --adam_beta_1=0.9 \
+  --adam_beta_2=0.95 \
+  --adam_eps=1e-8 \
   $@

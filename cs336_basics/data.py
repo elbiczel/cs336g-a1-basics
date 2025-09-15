@@ -30,9 +30,13 @@ def get_batch(
 
 def save_checkpoint(
         model: torch.nn.Module,
-        optimizer: torch.optim.Optimizer,
+        optimizer: Optional[torch.optim.Optimizer],
         iteration: int,
         out: str | os.PathLike | BinaryIO | IO[bytes]):
+    if optimizer == None:
+        # Saving just the model for safe weight loading.
+        torch.save(model.state_dict(), out)
+        return
     data = {}
     data["model"] = model.state_dict()
     data["opt"] = optimizer.state_dict()
@@ -43,8 +47,11 @@ def load_checkpoint(
         src: str | os.PathLike | BinaryIO | IO[bytes],
         model: torch.nn.Module,
         optimizer: Optional[torch.optim.Optimizer]) -> int:
-    data = torch.load(src)
+    if optimizer is None:
+        state = torch.load(src)
+        model.load_state_dict(state)
+        return -1
+    data = torch.load(src, weights_only=False)
     model.load_state_dict(data["model"])
-    if optimizer is not None:
-        optimizer.load_state_dict(data["opt"])
+    optimizer.load_state_dict(data["opt"])
     return data["iter"]

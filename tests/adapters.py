@@ -391,8 +391,6 @@ def run_transformer_lm(
         Float[Tensor, "batch_size sequence_length vocab_size"]: Tensor with the predicted unnormalized
         next-word distribution for each token.
     """
-    for k, v in weights.items():
-        print(f"Weights: {k} with shape: {v.shape}")
     layer = nn.transformer.TransformerLM(vocab_size, context_length, num_layers, d_model, num_heads, d_ff, rope_theta)
     adj_weights = {
         "token_embeddings.weight": weights["token_embeddings.weight"],
