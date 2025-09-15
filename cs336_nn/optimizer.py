@@ -1,5 +1,5 @@
 from collections.abc import Callable, Iterable
-from typing import Optional
+from typing import Dict, Optional, Tuple
 
 import numpy as np
 import torch
@@ -26,7 +26,14 @@ class SGD(torch.optim.Optimizer):
         return loss
 
 class AdamW(torch.optim.Optimizer):
-    def __init__(self, params, lr=1e-3, weight_decay=0.0, betas=(0.99, 0.999), eps=1e-8):
+    def __init__(
+            self,
+            params,
+            lr:float=1e-3,
+            weight_decay:float=0.0,
+            betas:Tuple[float, float]=(0.99, 0.999),
+            eps:float=1e-8,
+            param_names:Dict[int, str]={}):
         if lr < 0:
             raise ValueError(f"Invalid learning rate: {lr}")
         defaults = {
@@ -35,10 +42,12 @@ class AdamW(torch.optim.Optimizer):
             "betas": betas,
             "eps": eps,
         }
+        self._param_names = param_names
         super().__init__(params, defaults)
 
-    def step(self, closure: Optional[Callable] = None):
+    def step(self, closure: Optional[Callable] = None, return_log=False):
         loss = None if closure is None else closure()
+        log_dict = {} if return_log else None
         for group in self.param_groups:
             lr = group["lr"]
             weight_decay = group["weight_decay"]
@@ -54,16 +63,24 @@ class AdamW(torch.optim.Optimizer):
                 m = beta_1 * m + (1 - beta_1) * grad
                 v = beta_2 * v + (1 - beta_2) * grad**2
                 curr_lr = lr * ((1 - beta_2**step)**0.5) / (1 - beta_1**step)
-                # Update
-                p.data -= curr_lr * m / (v**0.5 + eps)
+                # Main update
+                update_matrix = curr_lr * m / (v**0.5 + eps)
                 # Weight decay
-                p.data -= lr * weight_decay * p.data
+                update_matrix += lr * weight_decay * p.data
+                if log_dict is not None:
+                    param_name = self._param_names.get(id(p), "<unknown>")
+                    p_norm = torch.linalg.vector_norm(p.data.detach())
+                    log_dict[f"param_norm/{param_name}"] = p_norm
+                    update_norm = torch.linalg.vector_norm(update_matrix.detach())
+                    log_dict[f"param_update_norm/{param_name}"] = update_norm
+                    log_dict[f"param_update_ratio/{param_name}"] = update_norm / p_norm
+                p.data -= update_matrix
 
                 # Update state
                 state["step"] = step + 1
                 state["m"] = m
                 state["v"] = v
-        return loss
+        return loss, log_dict
 
 def cosine_lr_schedule(t: int, lr_max: float, lr_min: float, warmup_t: int, t_c: int) -> float:
     if t < warmup_t:

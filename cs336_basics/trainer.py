@@ -101,6 +101,10 @@ def get_validation_metrics(model, val_data) -> dict:
         "val/perplexity": math.exp(val_loss / val_count)
     }
 
+def make_name_map(model: torch.nn.Module):
+    # Use id(param) as the key (tensors are unhashable); you can also attach p._name = name if you like
+    return {id(p): name for name, p in model.named_parameters()}
+
 def train(models_dir: str):
     cfg = wandb.config
     train_data = io.read_tokens(cfg.train_path)
@@ -149,7 +153,7 @@ def train(models_dir: str):
             "weight_decay": 0.0
         },
     ]
-    opt = nn.optimizer.AdamW(optimizer_grouped_parameters, cfg.lr, cfg.weight_decay)
+    opt = nn.optimizer.AdamW(optimizer_grouped_parameters, cfg.lr, cfg.weight_decay, param_names=make_name_map(model))
     wandb.watch(model, log="all", log_freq=cfg.log_freq)
 
     global_step, t0 = 0, time.perf_counter()
@@ -168,23 +172,8 @@ def train(models_dir: str):
 
         opt.zero_grad(set_to_none=True)
         loss.backward()
-        if cfg.max_grad_l2_norm > 0.0:
-            nn.optimizer.clip_grad(model.parameters(), cfg.max_grad_l2_norm)
-        for grp in opt.param_groups:
-            grp["lr"] = max(nn.optimizer.cosine_lr_schedule(global_step, cfg.lr, cfg.final_lr, cfg.warmup_t, cfg.t_c), 1e-8)
-        opt.step()
-
-        # stats
-        now = time.perf_counter()
-        step_time = now - step_t0
-        step_time_accum += step_time
-        step_t0 = now
-        with torch.no_grad():
-            pred = logits.argmax(dim=-1)
-            correct = (pred == yb).sum().item()
-
-        if (global_step > 0 and global_step % cfg.log_freq == 0) or global_step == cfg.max_steps-1:
-            val_metrics = get_validation_metrics(model, val_data)
+        should_log = (global_step > 0 and global_step % cfg.log_freq == 0) or global_step == cfg.max_steps-1
+        if should_log:
             per_param_stats = {
                 f"grad_norm/{name}": torch.linalg.vector_norm(p.grad.detach())
                 for name, p in model.named_parameters()
@@ -201,9 +190,28 @@ def train(models_dir: str):
                 for name, p in model.named_parameters()
                 if p.grad is not None
             })
+        if cfg.max_grad_l2_norm > 0.0:
+            nn.optimizer.clip_grad(model.parameters(), cfg.max_grad_l2_norm)
+        for grp in opt.param_groups:
+            grp["lr"] = max(nn.optimizer.cosine_lr_schedule(global_step, cfg.lr, cfg.final_lr, cfg.warmup_t, cfg.t_c), 1e-8)
+        _, maybe_opt_log_dict = opt.step(return_log=should_log)
+
+        # stats
+        now = time.perf_counter()
+        step_time = now - step_t0
+        step_time_accum += step_time
+        step_t0 = now
+        with torch.no_grad():
+            pred = logits.argmax(dim=-1)
+            correct = (pred == yb).sum().item()
+
+        if should_log:
+            val_metrics = get_validation_metrics(model, val_data)
             opt_lr = opt.param_groups[0]["lr"]
             sec_per_step = step_time_accum / cfg.log_freq
             step_time_accum = 0.0
+            assert maybe_opt_log_dict is not None
+            per_param_stats = per_param_stats | maybe_opt_log_dict
             wandb.log({
                 "global_step": global_step,
                 "train/loss": loss.item(),
@@ -215,7 +223,7 @@ def train(models_dir: str):
                 "time/minutes": (time.perf_counter() - t0) / 60.0,
                 "opt/lr": opt_lr,
                 "opt/grad_norm_total": total_grad_norm.item(),
-            } | {k: v.item()  for k, v in per_param_stats.items()}| val_metrics)
+            } | {k: v.item()  for k, v in per_param_stats.items()} | val_metrics)
         if global_step > 0 and cfg.checkpoint_step_freq > 0 and global_step % cfg.checkpoint_step_freq == 0:
             chkpt_path = f"{models_dir}/step_{global_step}.pt"
             data.save_checkpoint(model, opt, global_step, chkpt_path)
@@ -242,9 +250,14 @@ def main():
     wandb.define_metric("train/*", step_metric="global_step")
     wandb.define_metric("val/*", step_metric="global_step")
     wandb.define_metric("opt/*", step_metric="global_step")
+    wandb.define_metric("gradients/*", step_metric="global_step")
+    wandb.define_metric("parameters/*", step_metric="global_step")
     wandb.define_metric("grad_norm/*", step_metric="global_step")
     wandb.define_metric("grad_rms/*", step_metric="global_step")
     wandb.define_metric("param_numel/*", step_metric="global_step")
+    wandb.define_metric("param_norm/*", step_metric="global_step")
+    wandb.define_metric("param_update_norm/*", step_metric="global_step")
+    wandb.define_metric("param_update_ratio/*", step_metric="global_step")
     wandb.define_metric("time/*", step_metric="global_step")
     cfg = wandb.config
     device = cfg.device
