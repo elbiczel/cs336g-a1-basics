@@ -4,8 +4,8 @@ uv run cs336_basics/trainer.py \
   --val_path='data/TinyStoriesV2-GPT4-valid-trie-tokenized.dat' \
   --models_base_path='data/models' \
   --device='mps' \
-  --group='init_runs' \
-  --run_name='debug_1_08' \
+  --group='bug_fix_1' \
+  --run_name='bug_fix_1_00' \
   --lr=5e-4 \
   --final_lr=1e-6 \
   --warmup_t=150 \

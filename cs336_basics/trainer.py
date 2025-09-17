@@ -118,7 +118,9 @@ def train(models_dir: str):
     train_data = io.read_tokens(cfg.train_path)
     val_data = io.read_tokens(cfg.val_path)
 
+    # TODO: No LayerNorms (tune lr), Post-Norm vs Pre-Norm, NoPE rather than RoPE, SiLU vs SwiGLU (tune param counts).
     # Nice to have:
+    # TODO: Lecutre 3 ideas:
     # TODO: Try adding post-Norm (inside residual).
     # TODO: Add QK LayerNorms in Attention - for softmax stability there.
     # TODO: Try weight tying: embeddings == lm_head.

@@ -22,10 +22,11 @@ def get_batch(
     idx = starts[:, None] + np.arange(elements)
     seqs = data[idx].astype(np.int64)
 
-    x_cpu = torch.from_numpy(seqs[:, :-1])
-    y_cpu = torch.from_numpy(seqs[:, 1:])
-    batch = x_cpu.to(device, non_blocking=True)
-    targets = y_cpu.to(device, non_blocking=True)
+    # TODO: Support memory pinning and non blocking transfers to device.
+    x_cpu = torch.from_numpy(seqs[:, :-1].copy())
+    y_cpu = torch.from_numpy(seqs[:, 1:].copy())
+    batch = x_cpu.to(device)
+    targets = y_cpu.to(device)
     return batch, targets
 
 def save_checkpoint(
