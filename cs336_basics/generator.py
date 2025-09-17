@@ -31,6 +31,7 @@ def parse_params():
     # Model params
     parser.add_argument("--compile", type=bool, default=True, help="Whether the model should be compiled before generation.")
     parser.add_argument("--seed", type=int, default=42, help="Random seed.")
+    parser.add_argument("--resume", type=bool, default=False, help="If true, reas the resume checkpoint from the model, not the best one.")
     return parser.parse_args()
 
 eof_token_text = b"<|endoftext|>"
@@ -102,7 +103,8 @@ def generate(cfg) -> str:
     cfg.eof_token = eof_tokens[0]
 
     # Prep model.
-    model_path = f"{cfg.models_base_path}/{cfg.project}/{cfg.group}/{cfg.run_name}/best.pt"
+    model_name = "resume" if cfg.resume else "best"
+    model_path = f"{cfg.models_base_path}/{cfg.project}/{cfg.group}/{cfg.run_name}/{model_name}.pt"
     model = nn.transformer.TransformerLM(
         cfg.vocab_size,
         cfg.context_length,
@@ -119,7 +121,38 @@ def generate(cfg) -> str:
             model = torch.compile(model, backend="aot_eager")
         else:
             model = torch.compile(model, mode="max-autotune")
-    data.load_checkpoint(model_path, model, None)
+    if cfg.resume:
+        param_dict = {}
+        decay_params = set()
+        no_decay_params = set()
+        for module_name, module in model.named_modules():
+            for param_name, param in module.named_parameters(recurse=False):
+                full_name = f"{module_name}.{param_name}" if module_name else param_name
+                assert full_name not in param_dict
+                param_dict[full_name] = param
+                if isinstance(module, (nn.layer_norm.RMSNorm, nn.embedding.Embedding)):
+                    no_decay_params.add(full_name)
+                else:
+                    decay_params.add(full_name)
+        optimizer_grouped_parameters = [
+            # Default group.
+            {"params": [param_dict[n] for n in sorted(decay_params)]},
+            # Params without weight decay
+            {
+                "params": [param_dict[n] for n in sorted(no_decay_params)],
+                "weight_decay": 0.0
+            },
+        ]
+        opt = nn.optimizer.AdamW(
+            optimizer_grouped_parameters,
+            lr=cfg.lr,
+            weight_decay=cfg.weight_decay,
+            betas=(cfg.adam_beta_1, cfg.adam_beta_2),
+            eps=cfg.adam_eps
+        )
+    else:
+        opt= None
+    data.load_checkpoint(model_path, model, opt)
     model.eval()
 
     # Generate from model:

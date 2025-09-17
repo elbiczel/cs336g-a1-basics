@@ -178,6 +178,7 @@ def train(models_dir: str):
     
     best_step = 0; best_val_loss = torch.inf
     for xb, yb in dataset_iterator(train_data, shuffle=True, max_steps=cfg.max_steps):
+        global_step += 1
         logits = model(xb)
         ce_loss = nn.loss.cross_entropy(logits, yb)        
         logZ = torch.logsumexp(logits, dim=-1)
@@ -188,7 +189,7 @@ def train(models_dir: str):
 
         opt.zero_grad(set_to_none=True)
         loss.backward()
-        should_log_details = (global_step > 0 and global_step % cfg.detail_log_freq == 0) or global_step == cfg.max_steps-1
+        should_log_details = (global_step % cfg.detail_log_freq == 0) or global_step == cfg.max_steps
         per_param_stats = {}
         if should_log_details:
             per_param_stats = per_param_stats | {
@@ -222,7 +223,7 @@ def train(models_dir: str):
             pred = logits.argmax(dim=-1)
             correct = (pred == yb).sum().item()
 
-        if (global_step > 0 and global_step % cfg.log_freq == 0) or should_log_details:
+        if (global_step % cfg.log_freq == 0) or should_log_details:
             val_metrics = get_validation_metrics(model, val_data) if should_log_details else {}
             if val_metrics and val_metrics["val/loss"] < best_val_loss:
                 best_val_loss = val_metrics["val/loss"]
@@ -245,9 +246,7 @@ def train(models_dir: str):
                 "opt/clip_coef": clip_coef.item(),
             } | {k: v.item()  for k, v in per_param_stats.items()} | val_metrics)
         if should_log_details:
-            
             data.save_checkpoint(model, opt, global_step, f"{models_dir}/resume.pt")
-        global_step += 1
 
     data.load_checkpoint(f"{models_dir}/best.pt", model, None)
     final_metrics = {
@@ -274,6 +273,7 @@ def main():
         config=vars(params),
     )
     wandb.define_metric("global_step")
+    wandb.define_metric("final/*", step_metric="global_step")
     wandb.define_metric("train/*", step_metric="global_step")
     wandb.define_metric("val/*", step_metric="global_step")
     wandb.define_metric("opt/*", step_metric="global_step")

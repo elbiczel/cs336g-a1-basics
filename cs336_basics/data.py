@@ -18,16 +18,16 @@ def get_batch(
     if start is None:
         starts = np.random.randint(0, N - elements + 1, size=batch_size)
     else:
+        if not (0 <= start <= N - elements):
+            raise ValueError(f"start must be in [0, {N - elements}]")
         starts = start + np.arange(batch_size)
     idx = starts[:, None] + np.arange(elements)
-    seqs = data[idx].astype(np.int64)
+    # TODO: Support memory pinning and non blocking transfers.
+    seqs = torch.as_tensor(data[idx], dtype=torch.long, device=device)
 
-    # TODO: Support memory pinning and non blocking transfers to device.
-    x_cpu = torch.from_numpy(seqs[:, :-1].copy())
-    y_cpu = torch.from_numpy(seqs[:, 1:].copy())
-    batch = x_cpu.to(device)
-    targets = y_cpu.to(device)
-    return batch, targets
+    x = seqs[:, :-1].contiguous()
+    y = seqs[:, 1:].contiguous()
+    return x, y
 
 def save_checkpoint(
         model: torch.nn.Module,
