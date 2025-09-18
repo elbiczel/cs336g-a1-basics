@@ -1,18 +1,22 @@
-uv run cs336_basics/trainer.py \
+caffeinate uv run cs336_basics/trainer.py \
   --project='tiny-stories-v2' \
-  --train_path='data/TinyStoriesV2-GPT4-train-trie-tokenized.dat' \
-  --val_path='data/TinyStoriesV2-GPT4-valid-trie-tokenized.dat' \
+  --train_path='data/TinyStoriesV2-GPT4-train-tokenized.dat' \
+  --val_path='data/TinyStoriesV2-GPT4-valid-tokenized.dat' \
   --models_base_path='data/models' \
   --device='mps' \
-  --group='bug_fix_1' \
-  --run_name='bug_fix_1_00' \
-  --lr=5e-4 \
+  --group='bug_fix_2' \
+  --run_name='ver_1_01' \
+  --max_steps=1500 \
+  --t_c=1200 \
+  --detail_log_freq=40 \
+  --lr=5e-3 \
   --final_lr=1e-6 \
-  --warmup_t=150 \
+  --warmup_t=160 \
   --batch_size=32 \
   --max_grad_l2_norm=3.0 \
   --z_loss_weight=0.0 \
   --adam_beta_1=0.9 \
-  --adam_beta_2=0.95 \
+  --adam_beta_2=0.999 \
+  --weight_decay=0.01 \
   --adam_eps=1e-8 \
   $@

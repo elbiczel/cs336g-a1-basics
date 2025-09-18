@@ -52,7 +52,7 @@ def parse_params():
     parser.add_argument("--max_grad_l2_norm", type=float, default=3.0, help="max l2 norm applied for gradient clipping. If <= 0.0 no clipping is applied.")
     parser.add_argument("--z_loss_weight", type=float, default=0.0, help="Weight for the Z-loss.")
     parser.add_argument("--adam_beta_1", type=float, default=0.9, help="Beta 1 for AdamW optimizer.")
-    parser.add_argument("--adam_beta_2", type=float, default=0.95, help="Beta 2 for AdamW optimizer.")
+    parser.add_argument("--adam_beta_2", type=float, default=0.999, help="Beta 2 for AdamW optimizer.")
     parser.add_argument("--adam_eps", type=float, default=1e-8, help="Eps parameter for AdamW optimizer.")
 
     # Logging Options
@@ -124,6 +124,7 @@ def train(models_dir: str):
     # TODO: Try adding post-Norm (inside residual).
     # TODO: Add QK LayerNorms in Attention - for softmax stability there.
     # TODO: Try weight tying: embeddings == lm_head.
+    # TODO: Try using smaller std for Embedding layers. Typical uses are around 0.02 (clipped at 3*std).
     model = nn.transformer.TransformerLM(
         cfg.vocab_size,
         cfg.context_length,
