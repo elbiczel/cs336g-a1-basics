@@ -3,6 +3,7 @@ import math
 import os
 import random
 import time
+import sys
 from typing import Iterator, Tuple, Optional
 
 import numpy as np
@@ -45,17 +46,20 @@ def parse_params():
     parser.add_argument("--compile", type=bool, default=True, help="Whether the model should be compiled before training.")
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size.")
     parser.add_argument("--lr", type=float, default=1e-4, help="Peak learning rate.")
-    parser.add_argument("--final_lr", type=float, default=1e-5, help="Final learning rate.")
-    parser.add_argument("--warmup_t", type=int, default=100, help="Number of warm-up steps for the optimizer.")
-    parser.add_argument("--t_c", type=int, default=5000, help="Cosine cycle duration. After it's reached uses final_lr.")
-    parser.add_argument("--weight_decay", type=float, default=0.1, help="Weight decay.")
-    parser.add_argument("--max_grad_l2_norm", type=float, default=3.0, help="max l2 norm applied for gradient clipping. If <= 0.0 no clipping is applied.")
+    parser.add_argument("--final_lr", type=float, default=1e-6, help="Final learning rate.")
+    parser.add_argument("--warmup_t", type=int, default=200, help="Number of warm-up steps for the optimizer.")
+    parser.add_argument("--t_c", type=int, default=4500, help="Cosine cycle duration. After it's reached uses final_lr.")
+    parser.add_argument("--weight_decay", type=float, default=0.01, help="Weight decay.")
+    parser.add_argument("--max_grad_l2_norm", type=float, default=2.0, help="max l2 norm applied for gradient clipping. If <= 0.0 no clipping is applied.")
     parser.add_argument("--z_loss_weight", type=float, default=0.0, help="Weight for the Z-loss.")
     parser.add_argument("--adam_beta_1", type=float, default=0.9, help="Beta 1 for AdamW optimizer.")
     parser.add_argument("--adam_beta_2", type=float, default=0.999, help="Beta 2 for AdamW optimizer.")
     parser.add_argument("--adam_eps", type=float, default=1e-8, help="Eps parameter for AdamW optimizer.")
 
     # Logging Options
+    parser.add_argument(
+        "--running_loss_beta", type=float, default=0.98, help="Beta param for computation of running loss moving avg."
+    )
     parser.add_argument(
         "--log_freq", type=int, default=10, help="Log fast train/val metrics from a single batch."
     )
@@ -178,6 +182,8 @@ def train(models_dir: str):
     step_t0 = time.perf_counter()
     
     best_step = 0; best_val_loss = torch.inf
+    running_loss = None
+    best_running_loss = torch.inf
     for xb, yb in dataset_iterator(train_data, shuffle=True, max_steps=cfg.max_steps):
         global_step += 1
         logits = model(xb)
@@ -187,6 +193,24 @@ def train(models_dir: str):
         loss = ce_loss
         if cfg.z_loss_weight > 0.0:
             loss += (z_loss * cfg.z_loss_weight)
+        if not math.isfinite(loss.item()):
+            wandb.run.summary["diverged"] = True
+            wandb.run.summary["diverged_reason"] = "Loss is infinite."
+            wandb.log({"status/diverged": 1})
+            wandb.finish(exit_code=0)
+            sys.exit(0)
+        if running_loss is None:
+            running_loss = loss.item()
+        else:
+            running_loss = cfg.running_loss_beta * running_loss + (1 - cfg.running_loss_beta) * loss.item()
+        best_running_loss = min(best_running_loss, running_loss)
+        if running_loss > 10 * best_running_loss:
+            wandb.run.summary["diverged"] = True
+            wandb.run.summary["diverged_reason"] = f"Running loss diverged: {running_loss}, best: {best_running_loss}"
+            wandb.log({"status/diverged": 2})
+            wandb.finish(exit_code=0)
+            sys.exit(0)
+
 
         opt.zero_grad(set_to_none=True)
         loss.backward()
@@ -209,8 +233,15 @@ def train(models_dir: str):
                 f"grad_norm/{param_names.get(p_id, "<unknown>")}": param_grad_norm
                 for p_id, param_grad_norm in param_grad_norms.items()
             }
+        if not math.isfinite(total_grad_norm) or total_grad_norm > 1e3:
+            wandb.run.summary["diverged"] = True
+            wandb.run.summary["diverged_reason"] = f"||Grad|| is {total_grad_norm}"
+            wandb.log({"status/diverged": 3})
+            wandb.finish(exit_code=0)
+            sys.exit(0)
+
         for grp in opt.param_groups:
-            grp["lr"] = max(nn.optimizer.cosine_lr_schedule(global_step, cfg.lr, cfg.final_lr, cfg.warmup_t, cfg.t_c), 1e-8)
+            grp["lr"] = nn.optimizer.cosine_lr_schedule(global_step, cfg.lr, cfg.final_lr, cfg.warmup_t, cfg.t_c)
         _, maybe_opt_log_dict = opt.step(return_log=should_log_details)
         if maybe_opt_log_dict is not None:
             per_param_stats = per_param_stats | maybe_opt_log_dict
@@ -238,6 +269,7 @@ def train(models_dir: str):
                 "train/loss": loss.item(),
                 "train/ce_loss": ce_loss.item(),
                 "train/z_loss": z_loss.item(),
+                "train/running_loss": running_loss,
                 "train/acc": correct / yb.numel(),
                 "train/perplexity": math.exp(loss.item()),
                 "time/sec_per_step": sec_per_step,
@@ -264,6 +296,7 @@ def train(models_dir: str):
 
 def main():
     params = parse_params()
+    assert params.group != ""
 
     run = wandb.init(
         project=params.project,
@@ -275,6 +308,7 @@ def main():
     )
     wandb.define_metric("global_step")
     wandb.define_metric("final/*", step_metric="global_step")
+    wandb.define_metric("status/*", step_metric="global_step")
     wandb.define_metric("train/*", step_metric="global_step")
     wandb.define_metric("val/*", step_metric="global_step")
     wandb.define_metric("opt/*", step_metric="global_step")
@@ -300,7 +334,7 @@ def main():
     np.random.seed(cfg.seed)
     random.seed(cfg.seed)
 
-    models_dir = f"{cfg.models_base_path}/{cfg.project}/{cfg.group}/{cfg.run_name}"
+    models_dir = f"{cfg.models_base_path}/{cfg.project}/{cfg.group}/{run.id}"
     os.makedirs(models_dir, exist_ok=True)
     train(models_dir)
 

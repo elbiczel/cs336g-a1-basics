@@ -1,0 +1,21 @@
+program: cs336_basics/trainer.py
+command:
+  - uv
+  - run
+  - python
+  - ${program}
+  - ${args}
+  - --project=tiny-stories-v2
+  - --train_path=/Users/tomek/Coding/cs336g-a1-basics/data/TinyStoriesV2-GPT4-train-tokenized.dat
+  - --val_path=/Users/tomek/Coding/cs336g-a1-basics/data/TinyStoriesV2-GPT4-valid-tokenized.dat
+  - --models_base_path=/Users/tomek/Coding/cs336g-a1-basics/data/models
+  - --device=mps
+  - --group=lr_sweep
+method: grid
+metric:
+  name: val/loss
+  goal: minimize
+parameters:
+  # 0.0012 trained to very good train loss. 0.5 clearly diverges.
+  lr:
+    values: [0.000001, 0.00001, 0.0001, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5]

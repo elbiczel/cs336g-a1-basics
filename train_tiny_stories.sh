@@ -1,17 +1,16 @@
-caffeinate uv run cs336_basics/trainer.py \
+uv run python cs336_basics/trainer.py \
   --project='tiny-stories-v2' \
   --train_path='data/TinyStoriesV2-GPT4-train-tokenized.dat' \
   --val_path='data/TinyStoriesV2-GPT4-valid-tokenized.dat' \
   --models_base_path='data/models' \
   --device='mps' \
   --group='bug_fix_2' \
-  --run_name='ver_1_01' \
-  --max_steps=1500 \
-  --t_c=1200 \
-  --detail_log_freq=40 \
+  --max_steps=5000 \
+  --t_c=4500 \
+  --detail_log_freq=100 \
   --lr=5e-3 \
   --final_lr=1e-6 \
-  --warmup_t=160 \
+  --warmup_t=200 \
   --batch_size=32 \
   --max_grad_l2_norm=3.0 \
   --z_loss_weight=0.0 \
