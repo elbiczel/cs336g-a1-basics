@@ -19,10 +19,10 @@ special_token_str = special_token.decode("utf-8")
 def parse_params():
     parser = argparse.ArgumentParser(description="Tokenization configuration")
     # Project Data
-    parser.add_argument("--prefix", type=str, default="", help="Prefix for the paths.") 
+    parser.add_argument("--prefix", type=str, default="", help="Prefix for the paths.")
     parser.add_argument("--suffix", type=str, default="tokenized", help="Suffix for the tokenized dataset.")
     parser.add_argument("--use_trie", type=bool, default=False, help="Whether to use Trie or Merge tokenizer.")
-    return parser.parse_args() 
+    return parser.parse_args()
 
 
 def iterate_docs(path: str | os.PathLike, start: int, end: int) -> Iterable[str]:
@@ -70,7 +70,6 @@ def main():
 
     TokenizerCls = TrieTokenizer if cfg.use_trie else MergeTokenizer
     tokenizer = TokenizerCls.from_files(vocab_path, merges_path, special_tokens=[special_token])
-    print("special token: ", tokenizer.encode(special_token_str))
     print("Tokenizing: ", data_path)
     total_tokens = run_tokenize(tokenizer, data_path, out_path, 10)
     print("Number of tokens: ", total_tokens)
